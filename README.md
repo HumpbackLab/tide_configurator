@@ -4,8 +4,10 @@
 界面参考 Penguin Flight Console 的浅灰背景、白色直角面板、蓝色主操作和分区表单。
 标定模块、网页、板型配置和运行数据位于本工程目录。设备端程序安装在板上，
 TideConfigurator 不打包或上传录制器，运行时无需 SG2002 SDK。
-本工程的 `calibration/` 是自带的标定实现；仓库根目录旧 `calibration/` 仍供原有脚本使用，
+本工程的 `calibration/` 是自带的标定实现；SDK 根目录旧 `calibration/` 仍供原有脚本使用，
 TideConfigurator 运行时不再加载它。
+
+本项目以 [GNU GPLv3](LICENSE)（`GPL-3.0-only`）发布。
 
 ## 当前功能
 
