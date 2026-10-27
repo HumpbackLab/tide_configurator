@@ -1,6 +1,7 @@
 """Persisted calibration jobs; each run owns its process group and result directory."""
 import asyncio
 from datetime import datetime, timezone
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -46,6 +47,10 @@ class Jobs:
         jobs = []
         for path in self.directory.glob('*/job.json'):
             job = json.loads(path.read_text())
+            config = path.parent / 'result/schurvins.yaml'
+            if (job.get('status') == 'complete' and not config.parent.is_symlink() and
+                    config.is_file() and not config.is_symlink()):
+                job['config_sha256'] = hashlib.sha256(config.read_bytes()).hexdigest()
             state = path.parent / 'result/calibration.json'
             if state.exists():
                 try:

@@ -536,6 +536,34 @@ def create_app(workspace=None):
         await asyncio.to_thread(request.app.state.console.jobs.delete, identifier)
         return {'ok': True}
 
+    @app.post('/api/calibrations/{identifier}/apply')
+    async def apply_calibration(identifier: str, request: Request):
+        service = request.app.state.console
+        async with service.operation:
+            if not service.device.info.get('connected'):
+                raise ValueError('请先连接设备再应用标定配置')
+            service.vio = await asyncio.to_thread(service.device.vio_status)
+            if service.vio['state'] != 'stopped':
+                raise ValueError('请先停止 VIO 再应用标定配置')
+            folder = service.jobs.folder(identifier)
+            job = json.loads((folder / 'job.json').read_text())
+            result_dir = folder / 'result'
+            config = result_dir / 'schurvins.yaml'
+            marker = result_dir / 'COMPLETE'
+            if (job.get('id') != identifier or job.get('status') != 'complete' or
+                    result_dir.is_symlink() or marker.is_symlink() or
+                    not marker.is_file() or config.is_symlink() or not config.is_file()):
+                raise ValueError('只有已完成的标定结果可以应用到设备')
+            parsed = yaml.safe_load(config.read_text())
+            if (not isinstance(parsed, dict) or
+                    not isinstance(parsed.get('cameras'), list) or
+                    len(parsed['cameras']) != 2 or
+                    not isinstance(parsed.get('imu_params'), dict)):
+                raise ValueError('标定结果中的 VIO 配置无效')
+            result = await asyncio.to_thread(service.device.vio_apply, config)
+            service.vio = await asyncio.to_thread(service.device.vio_status)
+            return {'job_id': identifier, **result}
+
     @app.get('/api/calibrations/{identifier}/log')
     async def log(identifier: str, request: Request):
         folder = request.app.state.console.jobs.folder(identifier)

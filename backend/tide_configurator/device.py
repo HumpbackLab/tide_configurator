@@ -3,6 +3,7 @@ import base64
 import hashlib
 import json
 from pathlib import Path, PurePosixPath
+import re
 import shlex
 import socket
 import stat
@@ -49,7 +50,8 @@ class Device:
     def _board_script(self, name, *arguments, timeout=30):
         if not self.client:
             raise RuntimeError('请先连接设备')
-        if name not in {'vio-status.sh', 'vio-start.sh', 'vio-stop.sh', 'vio-deploy.sh'}:
+        if name not in {'vio-status.sh', 'vio-start.sh', 'vio-stop.sh',
+                        'vio-deploy.sh', 'vio-apply.sh'}:
             raise ValueError('未知板级脚本')
         script = (ROOT / 'boards' / self.board.id / name).read_bytes()
         channel = self.client.get_transport().open_session(timeout=10)
@@ -75,6 +77,14 @@ class Device:
             result = dict(state=state, pid=int(value) if value.isdigit() else None,
                           path=self.board.vio, config=self.board.vio_config,
                           log=self.board.vio_output + '/vio.log')
+            try:
+                parts = self.execute(['sha256sum', self.board.vio_config]).split()
+                digest = parts[0] if parts else ''
+                if not re.fullmatch(r'[0-9a-f]{64}', digest):
+                    raise RuntimeError('设备返回的配置 SHA-256 无效')
+                result['config_sha256'] = digest
+            except RuntimeError:
+                result['config_sha256'] = None
             if state == 'stopped':
                 try:
                     lines = self.execute(['tail', '-n', '40', result['log']]).splitlines()
@@ -146,6 +156,42 @@ class Device:
                 except OSError:
                     pass
                 raise
+
+    def vio_apply(self, config: Path):
+        with self.lock:
+            if self.vio_status()['state'] != 'stopped':
+                raise RuntimeError('请先停止 VIO 再应用标定配置')
+            checksum = hashlib.sha256(config.read_bytes()).hexdigest()
+            destination = PurePosixPath(self.board.vio_config)
+            temporary = str(destination.parent / ('.' + destination.name + '.' + uuid.uuid4().hex + '.tmp'))
+            sftp = self.client.open_sftp()
+            sftp.get_channel().settimeout(60)
+            try:
+                sftp.put(str(config), temporary)
+            except Exception:
+                try:
+                    sftp.remove(temporary)
+                except OSError:
+                    pass
+                raise
+            finally:
+                sftp.close()
+            try:
+                output = self._board_script('vio-apply.sh', str(destination), temporary,
+                                            checksum, timeout=30)
+            except Exception:
+                try:
+                    sftp = self.client.open_sftp()
+                    try:
+                        sftp.remove(temporary)
+                    finally:
+                        sftp.close()
+                except OSError:
+                    pass
+                raise
+            backup = next((line.removeprefix('backup ') for line in output.splitlines()
+                           if line.startswith('backup ')), '')
+            return {'path': str(destination), 'backup': backup, 'sha256': checksum}
 
     def close_session(self):
         with self.lock:

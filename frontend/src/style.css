@@ -328,18 +328,30 @@ h1 {
 }
 .vio-panel {
   min-width: 0;
+  display: flex;
+  flex-direction: column;
 }
-.vio-panel .panel-heading {
-  margin-bottom: 22px;
+.vio-panel-body {
+  flex: 1;
+  min-width: 0;
+  padding: 22px;
+}
+.vio-panel-footer {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 16px 22px;
+  border-top: 1px solid var(--line);
 }
 .vio-paths {
   display: grid;
-  gap: 16px;
-  margin-bottom: 21px;
+  gap: 15px;
+  margin-bottom: 22px;
 }
 .vio-paths > div {
   display: grid;
   gap: 6px;
+  min-width: 0;
 }
 .vio-paths span,
 .vio-progress span {
@@ -350,16 +362,17 @@ h1 {
   overflow-wrap: anywhere;
   font-size: 11px;
 }
-.vio-actions {
-  display: flex;
-  gap: 10px;
-  margin-top: 20px;
+.hash-value {
+  overflow-wrap: anywhere;
+  word-break: break-all;
+  font-size: 11px;
+  line-height: 1.6;
 }
 .vio-description {
   color: var(--muted);
   font-size: 12px;
   line-height: 1.7;
-  margin-bottom: 24px;
+  margin-bottom: 20px;
 }
 .vio-progress {
   display: grid;
@@ -890,6 +903,25 @@ h1 {
   color: #8d8d8d;
   margin-top: 5px;
 }
+.file-upload.vio-file-upload {
+  min-height: 78px;
+  padding: 17px;
+}
+.vio-file-upload > span:not(.file-extension) {
+  min-width: 0;
+}
+.vio-file-upload strong {
+  max-width: none;
+  overflow-wrap: anywhere;
+}
+.vio-file-upload.disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+.vio-file-upload.disabled:hover {
+  border-color: #c6c6c6;
+  background: transparent;
+}
 .file-extension {
   margin-left: auto;
   color: #8d8d8d;
@@ -1067,6 +1099,28 @@ h1 {
   gap: 8px;
   padding: 18px 22px;
   border-top: 1px solid var(--line);
+}
+.job-vio-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.calibration-config-hash {
+  padding: 16px 22px;
+  border-top: 1px solid var(--line);
+  background: #fafafa;
+}
+.calibration-config-hash-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 7px;
+  color: var(--muted);
+  font-size: 10px;
+}
+.calibration-config-hash > code {
+  display: block;
 }
 .result-metrics {
   display: grid;
@@ -1580,6 +1634,12 @@ footer > span:first-child {
   }
   .job-actions .push-right {
     margin-left: 0;
+  }
+  .job-vio-actions {
+    width: 100%;
+  }
+  .job-vio-actions > .button {
+    flex: 1 1 130px;
   }
   .job-progress {
     grid-template-columns: 1fr 1fr;

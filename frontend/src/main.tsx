@@ -45,6 +45,7 @@ type Capture = {
 };
 type Job = {
   id: string;
+  config_sha256?: string;
   status: string;
   created: string;
   stage: string;
@@ -103,7 +104,7 @@ type Snapshot = {
   };
   frame?: { width: number; height: number; sequence: number };
   preview_url?: string;
-  vio?: { state: string; pid?: number; path?: string; config?: string; log?: string; last_error?: string };
+  vio?: { state: string; pid?: number; path?: string; config?: string; config_sha256?: string | null; log?: string; last_error?: string };
   vio_transfer?: { status: string; stage: string; bytes: number; total: number; error?: string; backup?: string };
   error: string;
   captures: Capture[];
@@ -278,7 +279,7 @@ function App() {
     }
   }, [state.frame?.width, state.frame?.height]);
   useEffect(() => {
-    if (!state.device.connected || tab !== "vio") return;
+    if (!state.device.connected || (tab !== "vio" && tab !== "results")) return;
     const refresh = () => fetch("/api/vio/status").catch(() => {});
     refresh();
     const timer = setInterval(refresh, 3000);
@@ -1048,15 +1049,18 @@ function App() {
                    state.vio?.state === "stopped" ? "已停止" : connected ? "状态未知" : "未连接"}
                 </span>
               </div>
-              <div className="vio-paths">
-                <div><span>启动程序</span><code>{state.vio?.path || "连接设备后显示"}</code></div>
-                <div><span>标定配置</span><code>{state.vio?.config || "连接设备后显示"}</code></div>
-                <div><span>运行日志</span><code>{state.vio?.log || "连接设备后显示"}</code></div>
+              <div className="vio-panel-body">
+                <div className="vio-paths">
+                  <div><span>启动程序</span><code>{state.vio?.path || "连接设备后显示"}</code></div>
+                  <div><span>标定配置</span><code>{state.vio?.config || "连接设备后显示"}</code></div>
+                  <div><span>设备配置 SHA-256</span><code className="hash-value">{state.vio?.config_sha256 || (connected ? "无法读取" : "连接设备后显示")}</code></div>
+                  <div><span>运行日志</span><code>{state.vio?.log || "连接设备后显示"}</code></div>
+                </div>
+                <p className="field-hint">启动前会关闭相机预览；录制和数据取回完成后才能启动 VIO。</p>
+                {state.vio?.state === "stopped" && state.vio.last_error &&
+                  <p className="field-hint inline-error">上次退出：{state.vio.last_error}</p>}
               </div>
-              <p className="field-hint">启动 VIO 会先关闭相机预览；正在录制或取回数据时不能启动。</p>
-              {state.vio?.state === "stopped" && state.vio.last_error &&
-                <p className="field-hint inline-error">上次退出：{state.vio.last_error}</p>}
-              <div className="vio-actions">
+              <div className="vio-panel-footer">
                 <button className="button primary" disabled={!connected || !!busy || recordingBusy || transferRunning || state.vio?.state !== "stopped"}
                   onClick={() => action("vio-start", () => api("/vio/start"))}>
                   {busy === "vio-start" ? <LoaderCircle className="spin" size={16} /> : <Play size={16} />}
@@ -1073,37 +1077,45 @@ function App() {
               <div className="panel-heading">
                 <div><p className="eyebrow">INSTALL PACKAGE</p><h3>上传部署</h3></div>
               </div>
-              <p className="vio-description">选择为当前板型构建的 SchurVINS 发布包（.tar 或 .tar.gz）。部署前会校验包和程序，原有标定配置保留，旧版本备份在设备上。</p>
-              <label className="field">
-                <span>本地发布包</span>
-                <input ref={vioPackageInput} type="file" accept=".tar,.tar.gz,.tgz" disabled={!connected || !!busy}
-                  onChange={(event) => setVioPackage(event.target.files?.[0] || null)} />
-                <small>{vioPackage ? `${vioPackage.name} · ${size(vioPackage.size)}` : "例如 schurvins-gcc11-static-micro-ros-a53.tar"}</small>
-              </label>
-              <button className="button secondary" disabled={!connected || !vioPackage || !!busy || recordingBusy || transferRunning || state.vio?.state !== "stopped"}
-                onClick={() => action("vio-deploy", async () => {
-                  if (!vioPackage) return;
-                  setVioUploadPercent(0);
-                  await uploadVio(vioPackage);
-                  setVioPackage(null);
-                  if (vioPackageInput.current) vioPackageInput.current.value = "";
-                })}>
-                {busy === "vio-deploy" ? <LoaderCircle className="spin" size={16} /> : <Upload size={16} />}
-                {busy === "vio-deploy" ? "部署中…" : "上传并部署"}
-              </button>
-              {busy === "vio-deploy" && state.vio_transfer?.status !== "running" &&
-                <p className="field-hint">上传到本地服务 {vioUploadPercent}%</p>}
-              {state.vio_transfer?.status === "running" && <div className="vio-progress">
-                <span>{state.vio_transfer.stage === "browser_upload" ? "接收本地文件" :
-                       state.vio_transfer.stage === "verify" ? "检查发布包" :
-                       state.vio_transfer.stage === "device_upload" ? "上传到设备" : "在设备上安装"}</span>
-                {state.vio_transfer.total > 0 &&
-                  <progress max={state.vio_transfer.total} value={state.vio_transfer.bytes} />}
-              </div>}
-              {state.vio_transfer?.status === "complete" &&
-                <p className="field-hint success">部署完成。{state.vio_transfer.backup && `旧版本备份：${state.vio_transfer.backup}`}</p>}
-              {state.vio_transfer?.status === "failed" &&
-                <p className="field-hint inline-error">{state.vio_transfer.error}</p>}
+              <div className="vio-panel-body">
+                <p className="vio-description">选择当前板型的 SchurVINS 发布包。安装前会校验文件，保留设备上的标定配置，并备份旧程序。</p>
+                <label className={`file-upload vio-file-upload ${!connected || !!busy ? "disabled" : ""}`}>
+                  <input ref={vioPackageInput} type="file" accept=".tar,.tar.gz,.tgz" disabled={!connected || !!busy}
+                    onChange={(event) => setVioPackage(event.target.files?.[0] || null)} />
+                  <Upload size={19} />
+                  <span>
+                    <strong>{vioPackage?.name || "选择本地发布包"}</strong>
+                    <small>{vioPackage ? size(vioPackage.size) : "支持 .tar 和 .tar.gz"}</small>
+                  </span>
+                  <span className="file-extension">VIO</span>
+                </label>
+                {busy === "vio-deploy" && state.vio_transfer?.status !== "running" &&
+                  <p className="field-hint">上传到本地服务 {vioUploadPercent}%</p>}
+                {state.vio_transfer?.status === "running" && <div className="vio-progress">
+                  <span>{state.vio_transfer.stage === "browser_upload" ? "接收本地文件" :
+                         state.vio_transfer.stage === "verify" ? "检查发布包" :
+                         state.vio_transfer.stage === "device_upload" ? "上传到设备" : "在设备上安装"}</span>
+                  {state.vio_transfer.total > 0 &&
+                    <progress max={state.vio_transfer.total} value={state.vio_transfer.bytes} />}
+                </div>}
+                {state.vio_transfer?.status === "complete" &&
+                  <p className="field-hint success">部署完成。{state.vio_transfer.backup && `旧版本备份：${state.vio_transfer.backup}`}</p>}
+                {state.vio_transfer?.status === "failed" &&
+                  <p className="field-hint inline-error">{state.vio_transfer.error}</p>}
+              </div>
+              <div className="vio-panel-footer">
+                <button className="button secondary" disabled={!connected || !vioPackage || !!busy || recordingBusy || transferRunning || state.vio?.state !== "stopped"}
+                  onClick={() => action("vio-deploy", async () => {
+                    if (!vioPackage) return;
+                    setVioUploadPercent(0);
+                    await uploadVio(vioPackage);
+                    setVioPackage(null);
+                    if (vioPackageInput.current) vioPackageInput.current.value = "";
+                  })}>
+                  {busy === "vio-deploy" ? <LoaderCircle className="spin" size={16} /> : <Upload size={16} />}
+                  {busy === "vio-deploy" ? "部署中…" : "上传并部署"}
+                </button>
+              </div>
             </section>
           </div>
         </>
@@ -1113,7 +1125,7 @@ function App() {
             <div>
               <p className="eyebrow">CALIBRATION HISTORY</p>
               <h2>标定任务与结果</h2>
-              <p>查看任务状态、求解日志和结果报告，下载可用于 VIO 的配置。</p>
+              <p>查看任务状态、求解日志和结果报告，下载或应用 VIO 配置。</p>
             </div>
             <button
               className="button light"
@@ -1219,6 +1231,16 @@ function App() {
                     </p>
                   </>
                 )}
+                {job.status === "complete" && job.config_sha256 && (
+                  <div className="calibration-config-hash">
+                    <div className="calibration-config-hash-heading">
+                      <span>本次标定 VIO 配置 SHA-256</span>
+                      {connected && state.vio?.config_sha256 === job.config_sha256 &&
+                        <span className="badge good">当前使用</span>}
+                    </div>
+                    <code className="hash-value">{job.config_sha256}</code>
+                  </div>
+                )}
                 {job.error && <pre className="job-error">{job.error}</pre>}
                 <div className="job-actions">
                   <button
@@ -1270,14 +1292,27 @@ function App() {
                         相机–IMU 报告
                         <ExternalLink size={14} />
                       </a>
-                      <a
-                        className="button primary push-right"
-                        href={`/api/calibrations/${job.id}/files/schurvins.yaml`}
-                        download
-                      >
-                        <Download size={15} />
-                        下载 VIO 配置
-                      </a>
+                      <div className="job-vio-actions push-right">
+                        <a
+                          className="button primary"
+                          href={`/api/calibrations/${job.id}/files/schurvins.yaml`}
+                          download
+                        >
+                          <Download size={15} />
+                          下载 VIO 配置
+                        </a>
+                        <button
+                          className="button secondary"
+                          disabled={!connected || !!busy || state.vio?.state !== "stopped"}
+                          title={state.vio?.state !== "stopped" ? "请先停止 VIO" : undefined}
+                          onClick={() => action(`apply-${job.id}`, async () => {
+                            await api(`/calibrations/${job.id}/apply`);
+                          })}
+                        >
+                          {busy === `apply-${job.id}` ? <LoaderCircle className="spin" size={15} /> : <Upload size={15} />}
+                          {busy === `apply-${job.id}` ? "应用中…" : "应用到设备"}
+                        </button>
+                      </div>
                     </>
                   )}
                 </div>
