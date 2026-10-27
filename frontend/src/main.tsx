@@ -103,6 +103,8 @@ type Snapshot = {
   };
   frame?: { width: number; height: number; sequence: number };
   preview_url?: string;
+  vio?: { state: string; pid?: number; path?: string; config?: string; log?: string; last_error?: string };
+  vio_transfer?: { status: string; stage: string; bytes: number; total: number; error?: string; backup?: string };
   error: string;
   captures: Capture[];
   jobs: Job[];
@@ -195,7 +197,7 @@ function StereoView({ url, frame }: { url?: string; frame?: Snapshot["frame"] })
 function App() {
   const [state, setState] = useState<Snapshot>(empty);
   const [online, setOnline] = useState(false);
-  const [tab, setTab] = useState<"calibration" | "dataset" | "results">(
+  const [tab, setTab] = useState<"calibration" | "dataset" | "results" | "vio">(
     "calibration",
   );
   const [connectOpen, setConnectOpen] = useState(false);
@@ -204,6 +206,9 @@ function App() {
   const [host, setHost] = useState("192.168.123.99");
   const [username, setUsername] = useState("root");
   const [password, setPassword] = useState("");
+  const [vioPackage, setVioPackage] = useState<File | null>(null);
+  const [vioUploadPercent, setVioUploadPercent] = useState(0);
+  const vioPackageInput = useRef<HTMLInputElement>(null);
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   const [lens, setLens] = useState("wide");
@@ -272,6 +277,13 @@ function App() {
       setResolution(`${state.frame.width}x${state.frame.height}`);
     }
   }, [state.frame?.width, state.frame?.height]);
+  useEffect(() => {
+    if (!state.device.connected || tab !== "vio") return;
+    const refresh = () => fetch("/api/vio/status").catch(() => {});
+    refresh();
+    const timer = setInterval(refresh, 3000);
+    return () => clearInterval(timer);
+  }, [state.device.connected, tab]);
   const recorder = state.recorder;
   const recording = recorder?.state === "recording";
   const recordingBusy =
@@ -337,6 +349,24 @@ function App() {
     } finally {
       setBusy("");
     }
+  }
+  function uploadVio(file: File): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const request = new XMLHttpRequest();
+      request.open("POST", "/api/vio/deploy");
+      request.setRequestHeader("Content-Type", "application/octet-stream");
+      request.upload.onprogress = (event) => {
+        if (event.lengthComputable) setVioUploadPercent(Math.round(event.loaded / event.total * 100));
+      };
+      request.onload = () => {
+        let result: { detail?: string } = {};
+        try { result = JSON.parse(request.responseText); } catch { /* invalid response */ }
+        if (request.status >= 200 && request.status < 300) resolve();
+        else reject(new Error(result.detail || "VIO 部署失败"));
+      };
+      request.onerror = () => reject(new Error("上传中断，请检查本地服务"));
+      request.send(file);
+    });
   }
   async function startCalibration() {
     if (!selected) throw new Error("请先完成或导入一份录制");
@@ -479,6 +509,7 @@ function App() {
           [
             ["calibration", "相机标定", Target],
             ["dataset", "数据录制", FolderOpen],
+            ["vio", "VIO 部署", Activity],
             ["results", "标定记录", FileText],
           ] as const
         ).map(([key, label, Icon]) => (
@@ -509,7 +540,7 @@ function App() {
           </button>
         </div>
       )}
-      {tab !== "results" ? (
+      {tab === "calibration" || tab === "dataset" ? (
         <>
           <div className="page-heading">
             <div>
@@ -997,6 +1028,84 @@ function App() {
               )}
             </section>
           )}
+        </>
+      ) : tab === "vio" ? (
+        <>
+          <div className="page-heading">
+            <div>
+              <p className="eyebrow">VIO RUNTIME</p>
+              <h2>部署并运行 SchurVINS</h2>
+              <p>上传板型对应的发布包，在设备上启动或停止 VIO。</p>
+            </div>
+          </div>
+          <div className="vio-grid">
+            <section className="panel vio-panel">
+              <div className="panel-heading">
+                <div><p className="eyebrow">RUN STATUS</p><h3>运行状态</h3></div>
+                <span className={`badge ${state.vio?.state === "running" || state.vio?.state === "external" ? "good" : "neutral"}`}>
+                  {state.vio?.state === "running" ? `运行中 · PID ${state.vio.pid}` :
+                   state.vio?.state === "external" ? `外部启动 · PID ${state.vio.pid}` :
+                   state.vio?.state === "stopped" ? "已停止" : connected ? "状态未知" : "未连接"}
+                </span>
+              </div>
+              <div className="vio-paths">
+                <div><span>启动程序</span><code>{state.vio?.path || "连接设备后显示"}</code></div>
+                <div><span>标定配置</span><code>{state.vio?.config || "连接设备后显示"}</code></div>
+                <div><span>运行日志</span><code>{state.vio?.log || "连接设备后显示"}</code></div>
+              </div>
+              <p className="field-hint">启动 VIO 会先关闭相机预览；正在录制或取回数据时不能启动。</p>
+              {state.vio?.state === "stopped" && state.vio.last_error &&
+                <p className="field-hint inline-error">上次退出：{state.vio.last_error}</p>}
+              <div className="vio-actions">
+                <button className="button primary" disabled={!connected || !!busy || recordingBusy || transferRunning || state.vio?.state !== "stopped"}
+                  onClick={() => action("vio-start", () => api("/vio/start"))}>
+                  {busy === "vio-start" ? <LoaderCircle className="spin" size={16} /> : <Play size={16} />}
+                  启动 VIO
+                </button>
+                <button className="button light" disabled={!connected || !!busy || !["running", "external"].includes(state.vio?.state || "")}
+                  onClick={() => action("vio-stop", () => api("/vio/stop"))}>
+                  {busy === "vio-stop" ? <LoaderCircle className="spin" size={16} /> : <Square size={15} />}
+                  停止 VIO
+                </button>
+              </div>
+            </section>
+            <section className="panel vio-panel">
+              <div className="panel-heading">
+                <div><p className="eyebrow">INSTALL PACKAGE</p><h3>上传部署</h3></div>
+              </div>
+              <p className="vio-description">选择为当前板型构建的 SchurVINS 发布包（.tar 或 .tar.gz）。部署前会校验包和程序，原有标定配置保留，旧版本备份在设备上。</p>
+              <label className="field">
+                <span>本地发布包</span>
+                <input ref={vioPackageInput} type="file" accept=".tar,.tar.gz,.tgz" disabled={!connected || !!busy}
+                  onChange={(event) => setVioPackage(event.target.files?.[0] || null)} />
+                <small>{vioPackage ? `${vioPackage.name} · ${size(vioPackage.size)}` : "例如 schurvins-gcc11-static-micro-ros-a53.tar"}</small>
+              </label>
+              <button className="button secondary" disabled={!connected || !vioPackage || !!busy || recordingBusy || transferRunning || state.vio?.state !== "stopped"}
+                onClick={() => action("vio-deploy", async () => {
+                  if (!vioPackage) return;
+                  setVioUploadPercent(0);
+                  await uploadVio(vioPackage);
+                  setVioPackage(null);
+                  if (vioPackageInput.current) vioPackageInput.current.value = "";
+                })}>
+                {busy === "vio-deploy" ? <LoaderCircle className="spin" size={16} /> : <Upload size={16} />}
+                {busy === "vio-deploy" ? "部署中…" : "上传并部署"}
+              </button>
+              {busy === "vio-deploy" && state.vio_transfer?.status !== "running" &&
+                <p className="field-hint">上传到本地服务 {vioUploadPercent}%</p>}
+              {state.vio_transfer?.status === "running" && <div className="vio-progress">
+                <span>{state.vio_transfer.stage === "browser_upload" ? "接收本地文件" :
+                       state.vio_transfer.stage === "verify" ? "检查发布包" :
+                       state.vio_transfer.stage === "device_upload" ? "上传到设备" : "在设备上安装"}</span>
+                {state.vio_transfer.total > 0 &&
+                  <progress max={state.vio_transfer.total} value={state.vio_transfer.bytes} />}
+              </div>}
+              {state.vio_transfer?.status === "complete" &&
+                <p className="field-hint success">部署完成。{state.vio_transfer.backup && `旧版本备份：${state.vio_transfer.backup}`}</p>}
+              {state.vio_transfer?.status === "failed" &&
+                <p className="field-hint inline-error">{state.vio_transfer.error}</p>}
+            </section>
+          </div>
         </>
       ) : (
         <>

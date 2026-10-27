@@ -18,9 +18,10 @@ TideConfigurator 运行时不再加载它。
 - 标定临时录制、指定路径的数据集录制、自动生成新路径的数据集录制。
 - 取回完整录制，在录制记录中选择数据进行标定或删除。
 - 广角 / 鱼眼两阶段标定，任务日志、取消、历史记录，以及配置和 PDF 报告下载。
+- 上传 SchurVINS 板端发布包，保留已有标定配置并部署；启动、停止及查看 VIO 状态。
 
 当前设备端接入 SG2002 双目，网页预览提供 640×400 / 640×480。标定板使用网页生成的 6×4 AprilGrid，无需下载，不指定纸张或显示尺寸。
-IMU 模型固定为 `scale-misalignment`。配置应用、VIO 管理和 RV1103 尚未接入。
+IMU 模型固定为 `scale-misalignment`。标定配置自动应用和 RV1103 尚未接入。
 
 ## 安装与启动
 
@@ -64,15 +65,34 @@ SSH 密码只用于本次连接，不写入配置文件。首次主机密钥保�
 先在设备上安装录制器，再通过网页连接。例如在 SDK 根目录运行
 `scripts/dataset/build.sh`，将生成的 `install/soc_sg2002_tidesense_arm64_sd/tidesense-dataset/bin/tidesense_record`
 安装到板上 `/usr/local/bin/tidesense_record` 并设置可执行权限。TideSense 当前已安装该程序。
-VIO 路径目前只作板型配置记录；VIO 管理功能尚未接入。
+VIO 部署使用板型目录下的启动、停止、状态和部署脚本，不要求电脑安装 SG2002 SDK。
 数据和结果默认写入 `data/`，不再使用 SDK 的 `install/`。
 
-板型配置位于 `boards/tidesense/board.conf`，其中 `recorder`、`vio` 是**设备上的绝对路径**；
+板型配置位于 `boards/tidesense/board.conf`，其中 `recorder`、`vio`、`vio_config`、`vio_output` 是**设备上的绝对路径**；
 `model`、`architecture`、`default_host`、`imu_name` 和 `data_dir` 也是板级设置。
 增加板型时新建 `boards/<板型>/board.conf`，连接窗口会列出可用板型。
 目前相机预览、录制和标定流程只对 TideSense 做过验证。
 
 历史验证日志保存在忽略的 `artifacts/`，不参与运行，也不需要随软件交付。
+
+## VIO 部署与运行
+
+在“VIO 部署”页选择当前板型的 SchurVINS 发布包（`.tar` 或 `.tar.gz`），例如
+`schurvins-gcc11-static-micro-ros-a53.tar`。发布包需包含与 `board.conf` 的 VIO 安装目录同名的顶层目录、
+`run.sh`、AArch64 `bin/schurvins_stereo`、`schurvins.yaml` 和 `SHA256SUMS`。
+网页先验证归档路径和程序架构，再通过 SSH 上传到板上暂存目录；板端核对 SHA-256、检查程序可执行，
+随后替换安装目录。已有 `schurvins.yaml` / `tidesense.yaml` 会保留，旧程序留在带时间戳的备份目录。
+VIO 正在运行时需先停止才能部署。
+
+“启动 VIO”会关闭 TideConfigurator 的相机预览，使用 `vio_config` 启动设备上的 `vio`，
+位姿输出及日志写入 `vio_output`。正在录制或取回数据时不能启动。停止按钮先发送 SIGINT，
+必要时再发送 SIGTERM；断开网页或关闭后端不会自动停止已启动的 VIO。
+TideSense 的 ISP 修复已消除 RGB CAC 与 TNR 配置警告，但当前内核仍会把其他 VI 消息
+同步输出到 115200 波特串口，影响 SC7U22 的 SPI 读取时序。板级启动脚本仅在 VIO
+运行期间把串口控制台日志级别降到 3；
+内核消息仍保留在 `dmesg`。停止或进程异常退出时会自动恢复原级别。
+网页显示的运行状态会定时刷新。设备端脚本保存在 `boards/tidesense/`，通过 SSH 执行，
+不依赖 SDK 构建目录。部署程序与应用标定结果是两个操作；当前不会自动把新标定覆盖到设备配置。
 
 服务绑定本机回环地址，HTTP 和 WebSocket 拒绝外部网页 Origin。当前是单用户、单设备的本地工具。
 前端开发时运行后端，再在 `tide_configurator/frontend` 执行 `npm run dev`，打开 Vite 输出的本地地址。

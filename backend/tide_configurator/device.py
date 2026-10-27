@@ -14,6 +14,7 @@ import yaml
 
 import paramiko
 from .boards import load_board
+from .vio import validate_package
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -44,6 +45,111 @@ class Device:
         if output.channel.recv_exit_status():
             raise RuntimeError(errors.strip() or data.strip() or '设备命令失败')
         return data.strip()
+
+    def _board_script(self, name, *arguments, timeout=30):
+        if not self.client:
+            raise RuntimeError('请先连接设备')
+        if name not in {'vio-status.sh', 'vio-start.sh', 'vio-stop.sh', 'vio-deploy.sh'}:
+            raise ValueError('未知板级脚本')
+        script = (ROOT / 'boards' / self.board.id / name).read_bytes()
+        channel = self.client.get_transport().open_session(timeout=10)
+        channel.settimeout(timeout)
+        try:
+            channel.exec_command('sh -s -- ' + shlex.join(str(arg) for arg in arguments))
+            channel.sendall(script)
+            channel.shutdown_write()
+            output = channel.makefile('rb').read().decode(errors='replace').strip()
+            error = channel.makefile_stderr('rb').read().decode(errors='replace').strip()
+            if channel.recv_exit_status():
+                raise RuntimeError(error[-2000:] or output[-2000:] or '板端脚本执行失败')
+            return output
+        finally:
+            channel.close()
+
+    def vio_status(self):
+        with self.lock:
+            output = self._board_script('vio-status.sh', self.board.vio)
+            state, _, value = output.partition(' ')
+            if state not in ('running', 'external', 'stopped'):
+                raise RuntimeError('设备返回了无效的 VIO 状态')
+            result = dict(state=state, pid=int(value) if value.isdigit() else None,
+                          path=self.board.vio, config=self.board.vio_config,
+                          log=self.board.vio_output + '/vio.log')
+            if state == 'stopped':
+                try:
+                    lines = self.execute(['tail', '-n', '40', result['log']]).splitlines()
+                    errors = [line.split('Error: ', 1)[1] for line in lines if 'Error: ' in line]
+                    if errors:
+                        result['last_error'] = errors[-1]
+                except RuntimeError:
+                    pass  # No VIO run has written a log yet.
+            return result
+
+    def vio_start(self):
+        with self.lock:
+            if self.remote:
+                raise RuntimeError('启动 VIO 前请先关闭采集预览')
+            if self.vio_status()['state'] != 'stopped':
+                raise RuntimeError('VIO 已在运行')
+            self._board_script('vio-start.sh', self.board.vio, self.board.vio_config,
+                               self.board.vio_output, timeout=20)
+            status = self.vio_status()
+            if status['state'] == 'stopped':
+                raise RuntimeError('VIO 启动后立即退出；请查看设备日志')
+            return status
+
+    def vio_stop(self):
+        with self.lock:
+            self._board_script('vio-stop.sh', self.board.vio, timeout=25)
+            return self.vio_status()
+
+    def vio_deploy(self, package: Path, progress):
+        with self.lock:
+            if self.vio_status()['state'] != 'stopped':
+                raise RuntimeError('请先停止 VIO 再部署')
+            format = validate_package(package, self.board)
+            stage = self.board.data_dir.rstrip('/') + '/.tide-configurator-vio-' + uuid.uuid4().hex[:12]
+            archive = stage + '/package.tar' + ('.gz' if format == 'gz' else '')
+            sftp = self.client.open_sftp()
+            sftp.get_channel().settimeout(60)
+            try:
+                sftp.mkdir(stage, mode=0o700)
+                try:
+                    sftp.put(str(package), archive, callback=lambda sent, total: progress('device_upload', sent, total))
+                except Exception:
+                    try:
+                        sftp.remove(archive)
+                        sftp.rmdir(stage)
+                    except OSError:
+                        pass
+                    raise
+            finally:
+                sftp.close()
+            progress('install', 0, 0)
+            try:
+                output = self._board_script('vio-deploy.sh', archive,
+                                            str(PurePosixPath(self.board.vio).parent), stage,
+                                            format, timeout=120)
+                lines = output.splitlines()
+                return {'path': str(PurePosixPath(self.board.vio).parent),
+                        'backup': next((line.removeprefix('backup ') for line in lines
+                                        if line.startswith('backup ')), '')}
+            except Exception:
+                # The board script removes its own stage. Clean up if SSH failed before it ran.
+                try:
+                    sftp = self.client.open_sftp()
+                    try:
+                        sftp.remove(archive)
+                        sftp.rmdir(stage)
+                    finally:
+                        sftp.close()
+                except OSError:
+                    pass
+                raise
+
+    def close_session(self):
+        with self.lock:
+            self._close_session()
 
     def connect(self, host, port, username, password, board_id='tidesense'):
         with self.lock:

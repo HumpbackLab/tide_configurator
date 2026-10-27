@@ -24,6 +24,8 @@ architecture=aarch64
 default_host=192.0.2.1
 recorder=../../bin/recorder
 vio=/bin/vio
+vio_config=/bin/schurvins.yaml
+vio_output=/mnt/data/vio
 imu_name=testimu
 data_dir=/mnt/data
 ''')

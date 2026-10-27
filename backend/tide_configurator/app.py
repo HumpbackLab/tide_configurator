@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import shutil
 import stat
+import tempfile
 import uuid
 import time
 from urllib.parse import urlparse
@@ -22,6 +23,7 @@ from tide_calibration import recording, prepared as preparation, recovery
 
 from .device import Device, ROOT
 from .boards import list_boards
+from .vio import MAX_ARCHIVE_BYTES, validate_package
 from . import target
 from .jobs import Jobs, write_json, tail
 
@@ -63,6 +65,8 @@ class State:
         workspace.mkdir(parents=True, exist_ok=True)
         (workspace / 'captures').mkdir(exist_ok=True)
         self.device = Device(workspace)
+        self.vio = {'state': 'disconnected'}
+        self.vio_transfer = {'status': 'idle', 'stage': '', 'bytes': 0, 'total': 0}
         self.jobs = Jobs(workspace)
         self.recorder = None
         self.frame = None
@@ -136,6 +140,7 @@ class State:
     def snapshot(self):
         return dict(device=self.device.info, recorder=self.recorder,
                     frame=self.frame, preview_url=self.device.preview_url,
+                    vio=self.vio, vio_transfer=self.vio_transfer,
                     error=self.capture_error or self.error or (self.recorder or {}).get('preview_error', ''),
                     captures=list(reversed(self.captures)), jobs=self.jobs.all(), transfers=self.transfers)
 
@@ -337,8 +342,13 @@ def create_app(workspace=None):
         async with service.operation:
             service.error = ''
             try:
-                return await asyncio.to_thread(service.device.connect, body.host, body.port, body.username,
+                info = await asyncio.to_thread(service.device.connect, body.host, body.port, body.username,
                                                body.password.get_secret_value(), body.board)
+                try:
+                    service.vio = await asyncio.to_thread(service.device.vio_status)
+                except (OSError, RuntimeError):
+                    service.vio = {'state': 'unknown'}
+                return info
             except paramiko_error_types() as exc:
                 raise HTTPException(400, f'SSH 连接失败：{type(exc).__name__}') from exc
 
@@ -351,7 +361,83 @@ def create_app(workspace=None):
             await service.stop_poller()
             await asyncio.to_thread(service.device.disconnect)
             service.recorder = service.frame = None
+            service.vio = {'state': 'disconnected'}
             return {'ok': True}
+
+    @app.get('/api/vio/status')
+    async def vio_status(request: Request):
+        service = request.app.state.console
+        if not service.device.info.get('connected'):
+            return {'state': 'disconnected'}
+        if service.vio_transfer.get('status') == 'running':
+            return service.vio
+        service.vio = await asyncio.to_thread(service.device.vio_status)
+        return service.vio
+
+    @app.post('/api/vio/start')
+    async def vio_start(request: Request):
+        service = request.app.state.console
+        async with service.operation:
+            if service.active or service.transfer_tasks:
+                raise ValueError('请先停止录制并等待数据取回完成')
+            await service.stop_poller()
+            await asyncio.to_thread(service.device.close_session)
+            service.recorder = service.frame = None
+            service.vio = await asyncio.to_thread(service.device.vio_start)
+            return service.vio
+
+    @app.post('/api/vio/stop')
+    async def vio_stop(request: Request):
+        service = request.app.state.console
+        async with service.operation:
+            service.vio = await asyncio.to_thread(service.device.vio_stop)
+            return service.vio
+
+    @app.post('/api/vio/deploy')
+    async def vio_deploy(request: Request):
+        service = request.app.state.console
+        async with service.operation:
+            if not service.device.info.get('connected'):
+                raise ValueError('请先连接设备')
+            if service.active or service.transfer_tasks:
+                raise ValueError('请先停止录制并等待数据取回完成')
+            service.vio = await asyncio.to_thread(service.device.vio_status)
+            if service.vio['state'] != 'stopped':
+                raise ValueError('请先停止 VIO 再部署')
+            try:
+                declared = int(request.headers.get('content-length', '0'))
+            except ValueError as exc:
+                raise ValueError('上传文件长度无效') from exc
+            if declared > MAX_ARCHIVE_BYTES:
+                raise ValueError('SchurVINS 安装包超过 512 MiB')
+            transfer = service.vio_transfer = dict(status='running', stage='browser_upload',
+                                                    bytes=0, total=declared, error='')
+            filename = None
+            try:
+                with tempfile.NamedTemporaryFile(dir=service.workspace, prefix='.vio-upload-',
+                                                 delete=False) as output:
+                    filename = Path(output.name)
+                    async for chunk in request.stream():
+                        transfer['bytes'] += len(chunk)
+                        if transfer['bytes'] > MAX_ARCHIVE_BYTES:
+                            raise ValueError('SchurVINS 安装包超过 512 MiB')
+                        output.write(chunk)
+                if not transfer['bytes']:
+                    raise ValueError('请选择 SchurVINS 安装包')
+                transfer.update(stage='verify', bytes=0, total=0)
+                await asyncio.to_thread(validate_package, filename, service.device.board)
+                def progress(stage, sent, total):
+                    transfer.update(stage=stage, bytes=sent, total=total)
+                result = await asyncio.to_thread(service.device.vio_deploy, filename, progress)
+                transfer.update(status='complete', stage='complete', bytes=0, total=0,
+                                backup=result['backup'])
+                return result
+            except Exception as exc:
+                transfer.update(status='failed', error=str(exc))
+                raise
+            finally:
+                if filename:
+                    filename.unlink(missing_ok=True)
 
     @app.post('/api/preview')
     async def preview(body: Preview, request: Request):
@@ -359,6 +445,9 @@ def create_app(workspace=None):
             raise ValueError('不支持的采集尺寸')
         service = request.app.state.console
         async with service.operation:
+            service.vio = await asyncio.to_thread(service.device.vio_status)
+            if service.vio['state'] != 'stopped':
+                raise ValueError('VIO 正在运行，请先停止 VIO 再启动预览')
             if service.transfer_tasks and service.device.preview_url is None:
                 raise ValueError('请等待数据取回完成后再启动预览')
             message = await asyncio.to_thread(service.device.preview, body.width, body.height)

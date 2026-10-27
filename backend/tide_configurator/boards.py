@@ -4,7 +4,8 @@ from pathlib import Path, PurePosixPath
 import re
 
 ROOT = Path(__file__).resolve().parents[2] / 'boards'
-REQUIRED = {'model', 'architecture', 'default_host', 'recorder', 'vio', 'imu_name', 'data_dir'}
+REQUIRED = {'model', 'architecture', 'default_host', 'recorder', 'vio', 'vio_config',
+            'vio_output', 'imu_name', 'data_dir'}
 
 
 @dataclass(frozen=True)
@@ -15,6 +16,8 @@ class Board:
     default_host: str
     recorder: str
     vio: str
+    vio_config: str
+    vio_output: str
     imu_name: str
     data_dir: str
 
@@ -42,11 +45,13 @@ def load_board(board_id: str, root: Path = ROOT) -> Board:
     missing = REQUIRED - values.keys()
     if missing:
         raise ValueError(f'{path} 缺少配置项：{", ".join(sorted(missing))}')
-    for key in ('recorder', 'vio', 'data_dir'):
+    for key in ('recorder', 'vio', 'vio_config', 'vio_output', 'data_dir'):
         value = values[key]
         remote = PurePosixPath(value)
         if not remote.is_absolute() or '..' in remote.parts or value == '/':
             raise ValueError(f'{path} 的 {key} 必须是设备上的绝对路径')
+    if PurePosixPath(values['vio_config']).parent != PurePosixPath(values['vio']).parent:
+        raise ValueError(f'{path} 的 vio_config 必须位于 VIO 安装目录')
     if not re.fullmatch(r'[a-zA-Z0-9_.:-]+', values['default_host']):
         raise ValueError(f'{path} 的 default_host 无效')
     if not re.fullmatch(r'[a-zA-Z0-9_.-]+', values['imu_name']):
