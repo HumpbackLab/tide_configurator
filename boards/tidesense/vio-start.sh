@@ -3,6 +3,7 @@ set -eu
 run=$1
 config=$2
 output=$3
+camera_settings=$4
 binary=${run%/*}/bin/schurvins_stereo
 pidfile=/run/tide-configurator-vio.pid
 console_state=/run/tide-configurator-vio.console
@@ -15,6 +16,10 @@ restore_console() {
 }
 [ -x "$run" ] || { echo "SchurVINS is not installed: $run" >&2; exit 1; }
 [ -f "$config" ] || { echo "VIO calibration is missing: $config" >&2; exit 1; }
+if [ -f "$camera_settings" ] && ! "$run" --help 2>&1 | grep -q TIDE_CAM_CONFIG_PATH; then
+  echo 'SchurVINS is too old to read camera settings; deploy an updated package' >&2
+  exit 1
+fi
 for process in /proc/[0-9]*; do
   pid=${process##*/}
   [ -r "$process/cmdline" ] || continue
@@ -38,6 +43,7 @@ if [ "$previous" -gt 3 ]; then
   fi
 fi
 SCHUR_MICRO_ROS=0; export SCHUR_MICRO_ROS
+TIDE_CAM_CONFIG_PATH=$camera_settings; export TIDE_CAM_CONFIG_PATH
 nohup setsid "$run" --vio "$config" auto "$output/poses.csv" 0 >"$output/vio.log" 2>&1 </dev/null &
 pid=$!
 printf '%s\n' "$pid" >"$pidfile"

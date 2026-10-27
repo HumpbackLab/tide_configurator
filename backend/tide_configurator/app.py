@@ -41,6 +41,10 @@ class Preview(BaseModel):
     height: int = 400
 
 
+class CameraSettings(BaseModel):
+    exposure_max_us: int = Field(ge=1, le=50000)
+
+
 class Start(BaseModel):
     kind: str = Field(pattern='^(calibration|dataset)$')
     output: str = Field(default='', max_length=4096)
@@ -363,6 +367,26 @@ def create_app(workspace=None):
             service.recorder = service.frame = None
             service.vio = {'state': 'disconnected'}
             return {'ok': True}
+
+    @app.get('/api/camera/settings')
+    async def camera_settings(request: Request):
+        service = request.app.state.console
+        if not service.device.info.get('connected'):
+            raise ValueError('请先连接设备')
+        return await asyncio.to_thread(service.device.camera_settings)
+
+    @app.post('/api/camera/settings')
+    async def camera_settings_save(body: CameraSettings, request: Request):
+        service = request.app.state.console
+        async with service.operation:
+            if not service.device.info.get('connected'):
+                raise ValueError('请先连接设备')
+            if service.recorder or service.active:
+                raise ValueError('请先关闭相机预览再修改曝光上限')
+            service.vio = await asyncio.to_thread(service.device.vio_status)
+            if service.vio['state'] != 'stopped':
+                raise ValueError('请先停止 VIO 再修改曝光上限')
+            return await asyncio.to_thread(service.device.camera_settings_save, body.exposure_max_us)
 
     @app.get('/api/vio/status')
     async def vio_status(request: Request):

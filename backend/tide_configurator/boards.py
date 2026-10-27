@@ -6,6 +6,7 @@ import re
 ROOT = Path(__file__).resolve().parents[2] / 'boards'
 REQUIRED = {'model', 'architecture', 'default_host', 'recorder', 'vio', 'vio_config',
             'vio_output', 'imu_name', 'data_dir'}
+OPTIONAL = {'camera_settings', 'camera_settings_tool'}
 
 
 @dataclass(frozen=True)
@@ -20,6 +21,8 @@ class Board:
     vio_output: str
     imu_name: str
     data_dir: str
+    camera_settings: str
+    camera_settings_tool: str
 
     def public(self):
         return {'id': self.id, 'model': self.model, 'default_host': self.default_host}
@@ -39,13 +42,16 @@ def load_board(board_id: str, root: Path = ROOT) -> Board:
         if '=' not in line:
             raise ValueError(f'{path}:{number} 配置格式错误')
         key, value = (part.strip() for part in line.split('=', 1))
-        if key not in REQUIRED or key in values or not value:
+        if key not in REQUIRED | OPTIONAL or key in values or not value:
             raise ValueError(f'{path}:{number} 未知、重复或空的配置项：{key}')
         values[key] = value
     missing = REQUIRED - values.keys()
     if missing:
         raise ValueError(f'{path} 缺少配置项：{", ".join(sorted(missing))}')
-    for key in ('recorder', 'vio', 'vio_config', 'vio_output', 'data_dir'):
+    values.setdefault('camera_settings', values['data_dir'].rstrip('/') + '/tide-configurator/camera.conf')
+    values.setdefault('camera_settings_tool', str(PurePosixPath(values['recorder']).parent / 'tide_cam_settings'))
+    for key in ('recorder', 'vio', 'vio_config', 'vio_output', 'data_dir',
+                'camera_settings', 'camera_settings_tool'):
         value = values[key]
         remote = PurePosixPath(value)
         if not remote.is_absolute() or '..' in remote.parts or value == '/':

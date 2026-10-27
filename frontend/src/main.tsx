@@ -101,6 +101,7 @@ type Snapshot = {
     elapsed: number;
     error: string;
     output: string;
+    exposure_max_us?: number;
   };
   frame?: { width: number; height: number; sequence: number };
   preview_url?: string;
@@ -214,6 +215,10 @@ function App() {
   const [error, setError] = useState("");
   const [lens, setLens] = useState("wide");
   const [resolution, setResolution] = useState("640x400");
+  const [exposureDraft, setExposureDraft] = useState("500");
+  const [exposureSaved, setExposureSaved] = useState<number | null>(null);
+  const [exposureSource, setExposureSource] = useState<"default" | "file">("default");
+  const [exposureError, setExposureError] = useState("");
   const [seconds, setSeconds] = useState(120);
   const [output, setOutput] = useState("");
   const [noise, setNoise] = useState("");
@@ -278,6 +283,30 @@ function App() {
       setResolution(`${state.frame.width}x${state.frame.height}`);
     }
   }, [state.frame?.width, state.frame?.height]);
+  useEffect(() => {
+    if (!state.device.connected) {
+      setExposureSaved(null);
+      setExposureError("");
+      return;
+    }
+    let active = true;
+    fetch("/api/camera/settings")
+      .then(async (response) => {
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.detail || "无法读取设备相机设置");
+        return result as { exposure_max_us: number; source: "default" | "file" };
+      })
+      .then((result) => {
+        if (active) {
+          setExposureSaved(result.exposure_max_us);
+          setExposureSource(result.source);
+          setExposureDraft(String(result.exposure_max_us));
+          setExposureError("");
+        }
+      })
+      .catch((reason) => { if (active) setExposureError(String(reason)); });
+    return () => { active = false; };
+  }, [state.device.connected, state.device.host, state.device.board]);
   useEffect(() => {
     if (!state.device.connected || (tab !== "vio" && tab !== "results")) return;
     const refresh = () => fetch("/api/vio/status").catch(() => {});
@@ -707,6 +736,30 @@ function App() {
                     <strong>200 Hz</strong>
                   </div>
                 </div>
+                <label className="field">
+                  <span>自动曝光上限 <small>µs</small></span>
+                  <input type="number" min="1" max="50000" step="1"
+                    value={exposureDraft}
+                    disabled={!connected || !!busy || preview || state.vio?.state !== "stopped"}
+                    onChange={(event) => setExposureDraft(event.target.value)} />
+                  <small>设备上的统一设置，预览、录制和 VIO 下次启动时生效。当前默认 500 µs。</small>
+                  {exposureError && <small className="inline-error">{exposureError}</small>}
+                  <div className="camera-setting-action">
+                    <span>{exposureSaved === null ? "设备设置未读取" :
+                      `${exposureSource === "default" ? "设备默认" : "设备已保存"} ${exposureSaved} µs`}
+                      {recorder?.exposure_max_us ? ` · 当前采集 ${recorder.exposure_max_us} µs` : ""}</span>
+                    <button className="button light" type="button"
+                      disabled={!connected || !!busy || preview || state.vio?.state !== "stopped" ||
+                        !Number.isInteger(Number(exposureDraft)) || Number(exposureDraft) < 1 ||
+                        Number(exposureDraft) > 50000 || Number(exposureDraft) === exposureSaved}
+                      onClick={() => action("camera-settings", async () => {
+                        const result = await api("/camera/settings", { exposure_max_us: Number(exposureDraft) });
+                        setExposureSaved(result.exposure_max_us);
+                        setExposureSource("file");
+                        setExposureError("");
+                      })}>保存</button>
+                  </div>
+                </label>
                 <label className="field">
                   <span>
                     录制时长 <small>秒，0 表示手动停止</small>

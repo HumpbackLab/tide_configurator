@@ -6,6 +6,31 @@ import pytest
 from tide_configurator.device import Device
 
 
+def test_camera_settings_use_device_tool_and_reject_old_recorder(tmp_path):
+    device = Device(tmp_path)
+    device.client = MagicMock()
+    stored = {'value': 500, 'updated_recorder': False}
+    def execute(args):
+        if args == [device.recorder_path, '--help']:
+            return 'TIDE_CAM_CONFIG_PATH' if stored['updated_recorder'] else 'old recorder'
+        if args[:2] == ['test', '-x']:
+            return ''
+        if args[0] == device.board.camera_settings_tool:
+            if args[1] == 'set':
+                stored['value'] = int(args[3])
+            return f"exposure_max_us={stored['value']}\nsource=file"
+        raise AssertionError(args)
+    device.execute = execute
+    assert device.camera_settings()['exposure_max_us'] == 500
+    with pytest.raises(RuntimeError, match='版本过旧'):
+        device.camera_settings_save(1200)
+    stored['updated_recorder'] = True
+    assert device.camera_settings_save(1200)['exposure_max_us'] == 1200
+    device.remote = '/tmp/active-preview'
+    with pytest.raises(ValueError, match='关闭相机预览'):
+        device.camera_settings_save(1500)
+
+
 def test_failed_camera_start_is_cleaned_up_and_can_retry(tmp_path):
     device = Device(tmp_path)
     device.client = MagicMock()

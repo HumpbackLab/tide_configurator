@@ -39,6 +39,36 @@ class Device:
     def recorder_path(self):
         return self.board.recorder
 
+    def camera_settings(self):
+        with self.lock:
+            try:
+                self.execute(['test', '-x', self.board.camera_settings_tool])
+            except RuntimeError as exc:
+                raise RuntimeError('设备缺少 tide_cam_settings，请先更新设备端录制程序') from exc
+            output = self.execute([self.board.camera_settings_tool, 'get', self.board.camera_settings])
+            match = re.fullmatch(r'exposure_max_us=([1-9][0-9]*)\nsource=(default|file)', output)
+            if not match or int(match[1]) > 50000:
+                raise RuntimeError('设备返回了无效的相机设置')
+            return {'exposure_max_us': int(match[1]), 'source': match[2],
+                    'path': self.board.camera_settings}
+
+    def camera_settings_save(self, exposure_max_us: int):
+        with self.lock:
+            if type(exposure_max_us) is not int or not 1 <= exposure_max_us <= 50000:
+                raise ValueError('自动曝光上限必须在 1..50000 µs 之间')
+            if self.remote:
+                raise ValueError('请先关闭相机预览再修改曝光上限')
+            help_text = self.execute([self.recorder_path, '--help'])
+            if 'TIDE_CAM_CONFIG_PATH' not in help_text:
+                raise RuntimeError('设备录制器版本过旧，请先更新后再修改曝光上限')
+            try:
+                self.execute(['test', '-x', self.board.camera_settings_tool])
+            except RuntimeError as exc:
+                raise RuntimeError('设备缺少 tide_cam_settings，请先更新设备端录制程序') from exc
+            self.execute([self.board.camera_settings_tool, 'set', self.board.camera_settings,
+                          str(exposure_max_us)])
+            return self.camera_settings()
+
     def execute(self, arguments):
         _, output, error = self.client.exec_command(shlex.join(arguments), timeout=15)
         data = output.read().decode(errors='replace')
@@ -102,7 +132,7 @@ class Device:
             if self.vio_status()['state'] != 'stopped':
                 raise RuntimeError('VIO 已在运行')
             self._board_script('vio-start.sh', self.board.vio, self.board.vio_config,
-                               self.board.vio_output, timeout=20)
+                               self.board.vio_output, self.board.camera_settings, timeout=20)
             status = self.vio_status()
             if status['state'] == 'stopped':
                 raise RuntimeError('VIO 启动后立即退出；请查看设备日志')
@@ -332,7 +362,7 @@ class Device:
                     if not imu.startswith('/dev/iio:device') or '\n' in imu:
                         raise RuntimeError(f'没有找到 {self.board.imu_name.upper()} IMU')
                     arguments += ['--imu', imu, '--width', str(width), '--height', str(height)]
-                command = shlex.join(arguments)
+                command = shlex.join(['env', 'TIDE_CAM_CONFIG_PATH=' + self.board.camera_settings] + arguments)
                 self.daemon = self.client.get_transport().open_session()
                 self.daemon.exec_command('exec ' + command + ' > ' + shlex.quote(remote + '/session.log') + ' 2>&1')
                 deadline = time.monotonic() + 25

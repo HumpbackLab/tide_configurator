@@ -687,6 +687,17 @@ h1 {
   color: #8d8d8d;
   line-height: 1.6;
 }
+.camera-setting-action {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 11px;
+  color: var(--muted);
+}
+.camera-setting-action .button {
+  flex: 0 0 auto;
+}
 .field input,
 .field select,
 .field textarea,
