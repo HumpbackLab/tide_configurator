@@ -1,5 +1,6 @@
 """SSH transport to the recorder's Unix socket; credentials stay in memory."""
 import base64
+import errno
 import hashlib
 import json
 from pathlib import Path, PurePosixPath
@@ -41,15 +42,29 @@ class Device:
 
     def camera_settings(self):
         with self.lock:
+            sftp = self.client.open_sftp()
             try:
-                self.execute(['test', '-x', self.board.camera_settings_tool])
-            except RuntimeError as exc:
-                raise RuntimeError('设备缺少 tide_cam_settings，请先更新设备端录制程序') from exc
-            output = self.execute([self.board.camera_settings_tool, 'get', self.board.camera_settings])
-            match = re.fullmatch(r'exposure_max_us=([1-9][0-9]*)\nsource=(default|file)', output)
+                try:
+                    with sftp.open(self.board.camera_settings, 'rb') as source:
+                        data = source.read(4097)
+                except OSError as exc:
+                    if exc.errno != errno.ENOENT:
+                        raise
+                    return {'exposure_max_us': 500, 'source': 'default',
+                            'path': self.board.camera_settings}
+            finally:
+                sftp.close()
+            if len(data) > 4096:
+                raise RuntimeError('设备相机设置文件过长')
+            try:
+                lines = [line.strip() for line in data.decode('ascii').splitlines()
+                         if line.strip() and not line.lstrip().startswith('#')]
+            except UnicodeDecodeError as exc:
+                raise RuntimeError('设备相机设置文件不是 ASCII 文本') from exc
+            match = re.fullmatch(r'exposure_max_us\s*=\s*([1-9][0-9]*)', lines[0]) if len(lines) == 1 else None
             if not match or int(match[1]) > 50000:
-                raise RuntimeError('设备返回了无效的相机设置')
-            return {'exposure_max_us': int(match[1]), 'source': match[2],
+                raise RuntimeError('设备相机设置文件无效：需要 exposure_max_us=1..50000')
+            return {'exposure_max_us': int(match[1]), 'source': 'file',
                     'path': self.board.camera_settings}
 
     def camera_settings_save(self, exposure_max_us: int):
@@ -61,12 +76,25 @@ class Device:
             help_text = self.execute([self.recorder_path, '--help'])
             if 'TIDE_CAM_CONFIG_PATH' not in help_text:
                 raise RuntimeError('设备录制器版本过旧，请先更新后再修改曝光上限')
+            destination = self.board.camera_settings
+            parent = str(PurePosixPath(destination).parent)
+            temporary = str(PurePosixPath(parent) / ('.camera.conf.' + uuid.uuid4().hex + '.tmp'))
+            self.execute(['mkdir', '-p', parent])
+            sftp = self.client.open_sftp()
             try:
-                self.execute(['test', '-x', self.board.camera_settings_tool])
-            except RuntimeError as exc:
-                raise RuntimeError('设备缺少 tide_cam_settings，请先更新设备端录制程序') from exc
-            self.execute([self.board.camera_settings_tool, 'set', self.board.camera_settings,
-                          str(exposure_max_us)])
+                sftp.get_channel().settimeout(15)
+                with sftp.open(temporary, 'wb') as target:
+                    target.write(f'exposure_max_us={exposure_max_us}\n'.encode('ascii'))
+                    target.flush()
+                self.execute(['mv', '-f', temporary, destination])
+            except Exception:
+                try:
+                    sftp.remove(temporary)
+                except OSError:
+                    pass
+                raise
+            finally:
+                sftp.close()
             return self.camera_settings()
 
     def execute(self, arguments):

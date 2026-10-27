@@ -1,4 +1,6 @@
 from unittest.mock import MagicMock
+from io import BytesIO
+import errno
 import threading
 
 import pytest
@@ -6,26 +8,54 @@ import pytest
 from tide_configurator.device import Device
 
 
-def test_camera_settings_use_device_tool_and_reject_old_recorder(tmp_path):
+def test_camera_settings_use_sftp_without_device_helper(tmp_path):
     device = Device(tmp_path)
     device.client = MagicMock()
-    stored = {'value': 500, 'updated_recorder': False}
+    files = {}
+    updated_recorder = False
+
+    class RemoteUpload(BytesIO):
+        def __init__(self, path):
+            super().__init__()
+            self.path = path
+
+        def close(self):
+            if not self.closed:
+                files[self.path] = self.getvalue()
+            super().close()
+
+    def remote_open(path, mode='r'):
+        if mode == 'wb':
+            return RemoteUpload(path)
+        if path not in files:
+            raise FileNotFoundError(errno.ENOENT, 'No such file', path)
+        return BytesIO(files[path])
+
+    sftp = device.client.open_sftp.return_value
+    sftp.open.side_effect = remote_open
+
     def execute(args):
         if args == [device.recorder_path, '--help']:
-            return 'TIDE_CAM_CONFIG_PATH' if stored['updated_recorder'] else 'old recorder'
-        if args[:2] == ['test', '-x']:
+            return 'TIDE_CAM_CONFIG_PATH' if updated_recorder else 'old recorder'
+        if args[:2] == ['mkdir', '-p']:
             return ''
-        if args[0] == device.board.camera_settings_tool:
-            if args[1] == 'set':
-                stored['value'] = int(args[3])
-            return f"exposure_max_us={stored['value']}\nsource=file"
+        if args[:2] == ['mv', '-f']:
+            files[args[3]] = files.pop(args[2])
+            return ''
         raise AssertionError(args)
+
     device.execute = execute
-    assert device.camera_settings()['exposure_max_us'] == 500
+    assert device.camera_settings()['source'] == 'default'
     with pytest.raises(RuntimeError, match='版本过旧'):
         device.camera_settings_save(1200)
-    stored['updated_recorder'] = True
+    updated_recorder = True
     assert device.camera_settings_save(1200)['exposure_max_us'] == 1200
+    assert files[device.board.camera_settings] == b'exposure_max_us=1200\n'
+    files[device.board.camera_settings] = b'# edited on device\nexposure_max_us = 700\n'
+    assert device.camera_settings()['exposure_max_us'] == 700
+    files[device.board.camera_settings] = b'exposure_max_us=0\n'
+    with pytest.raises(RuntimeError, match='设置文件无效'):
+        device.camera_settings()
     device.remote = '/tmp/active-preview'
     with pytest.raises(ValueError, match='关闭相机预览'):
         device.camera_settings_save(1500)

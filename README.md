@@ -13,7 +13,7 @@ TideConfigurator 是运行在电脑上的 TideSense 配置工具。通过浏览�
 ## 准备
 
 - 电脑：Linux、Python 3.10+、Node.js 22.12+；运行标定还需要 Podman。
-- 设备：已安装新版 `tidesense_record` 和 `tide_cam_settings`，可通过 SSH 连接。浏览器需要能访问设备，以查看预览和下载录制。
+- 设备：已安装新版 `tidesense_record`，可通过 SSH 连接。浏览器需要能访问设备，以查看预览和下载录制。
 - 部署 VIO 需要 SchurVINS 发布包；运行 VIO 需要设备上已安装 SchurVINS。
 
 TideConfigurator 自带标定代码，运行时不需要 SG2002 SDK。设备程序路径在 [`boards/tidesense/board.conf`](boards/tidesense/board.conf) 中配置。
@@ -44,7 +44,7 @@ npm --prefix frontend run build
 4. 在“VIO 部署”页上传 SchurVINS 发布包，并启动或停止 VIO。
 
 标定使用 `scale-misalignment` IMU 模型。录制和标定结果默认保存在项目的 `data/` 目录。
-自动曝光上限保存在设备的 `camera.conf` 中；停止预览和 VIO 后可在录制设置里修改，重启采集后生效。设备文件路径和设置工具路径由板型配置指定。
+自动曝光上限保存在设备的 `/mnt/data/tide-configurator/camera.conf` 中，文件内容如 `exposure_max_us=1200`。可在录制设置中修改，也可用文本编辑器直接编辑；重启采集后生效。文件路径由板型配置指定。
 
 ## 板型配置
 
