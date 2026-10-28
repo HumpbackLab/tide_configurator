@@ -3,6 +3,7 @@ import asyncio
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 import json
+import math
 import os
 from pathlib import Path
 import shutil
@@ -26,6 +27,7 @@ from .boards import list_boards
 from .vio import MAX_ARCHIVE_BYTES, validate_package
 from . import target
 from .jobs import Jobs, write_json, tail
+from .ros import RosTelemetry
 
 
 class Connect(BaseModel):
@@ -71,6 +73,21 @@ class State:
         self.device = Device(workspace)
         self.vio = {'state': 'disconnected'}
         self.vio_transfer = {'status': 'idle', 'stage': '', 'bytes': 0, 'total': 0}
+        self.cpu_percent = None
+        self.cpu_poller = None
+        self.ros_error = ''
+        self.trajectory_dir = workspace / 'vio-trajectories'
+        self.trajectory_dir.mkdir(exist_ok=True)
+        self.pose_session = uuid.uuid4().hex
+        self.trajectory_path = self.trajectory_dir / (self.pose_session + '.jsonl')
+        self.trajectory_file = None
+        self.pose_seq = 0
+        self.pose_segment = 0
+        self.last_pose_stamp = None
+        self.last_pose_frame = None
+        self.tracking = False
+        self.pose_revision = 0
+        self.ros = RosTelemetry(workspace, self.on_pose, self.on_tracking)
         self.jobs = Jobs(workspace)
         self.recorder = None
         self.frame = None
@@ -145,8 +162,92 @@ class State:
         return dict(device=self.device.info, recorder=self.recorder,
                     frame=self.frame, preview_url=self.device.preview_url,
                     vio=self.vio, vio_transfer=self.vio_transfer,
+                    cpu_percent=self.cpu_percent,
+                    trajectory=dict(points=self.pose_seq, session=self.pose_session,
+                                    available=self.trajectory_path.is_file()),
+                    ros=dict(connected=self.ros.running, error=self.ros.error or self.ros_error),
                     error=self.capture_error or self.error or (self.recorder or {}).get('preview_error', ''),
                     captures=list(reversed(self.captures)), jobs=self.jobs.all(), transfers=self.transfers)
+
+    def reset_trajectory(self):
+        if self.trajectory_file is not None:
+            self.trajectory_file.close()
+            self.trajectory_file = None
+        self.pose_session = uuid.uuid4().hex
+        self.trajectory_path = self.trajectory_dir / (self.pose_session + '.jsonl')
+        self.pose_seq = 0
+        self.pose_segment = 0
+        self.last_pose_stamp = None
+        self.last_pose_frame = None
+        self.tracking = False
+        self.pose_revision += 1
+
+    def on_tracking(self, tracking):
+        if not tracking and self.tracking and self.pose_seq:
+            self.pose_segment += 1
+        self.tracking = tracking
+        self.pose_revision += 1
+
+    def on_pose(self, message):
+        position = message.pose.position
+        orientation = message.pose.orientation
+        values = [position.x, position.y, position.z,
+                  orientation.x, orientation.y, orientation.z, orientation.w]
+        frame = message.header.frame_id
+        stamp = (message.header.stamp.sec, message.header.stamp.nanosec)
+        if not frame or not all(math.isfinite(value) for value in values):
+            return
+        if sum(value * value for value in values[3:]) < 1e-12:
+            return
+        if self.last_pose_frame is not None and (frame != self.last_pose_frame or
+                                                stamp < self.last_pose_stamp):
+            self.reset_trajectory()
+        if stamp == self.last_pose_stamp:
+            return
+        point = dict(seq=self.pose_seq + 1, segment=self.pose_segment,
+                     stamp_sec=stamp[0], stamp_nanosec=stamp[1],
+                     position=values[:3], orientation=values[3:], frame=frame)
+        try:
+            if self.trajectory_file is None:
+                self.trajectory_file = self.trajectory_path.open('x', encoding='utf-8', buffering=1)
+            self.trajectory_file.write(json.dumps(point, ensure_ascii=False, allow_nan=False,
+                                                  separators=(',', ':')) + '\n')
+        except OSError as exc:
+            self.ros_error = f'轨迹保存失败：{exc}'
+            return
+        self.pose_seq += 1
+        self.last_pose_stamp = stamp
+        self.last_pose_frame = frame
+        self.tracking = True
+        self.pose_revision += 1
+
+    async def poll_cpu(self):
+        previous = None
+        try:
+            while self.device.info.get('connected'):
+                try:
+                    current = await asyncio.to_thread(self.device.cpu_counters)
+                    if previous is not None and current[0] > previous[0]:
+                        total = current[0] - previous[0]
+                        idle = current[1] - previous[1]
+                        self.cpu_percent = round(max(0, min(100, 100 * (total - idle) / total)), 1)
+                    previous = current
+                except (OSError, RuntimeError, ValueError, IndexError):
+                    self.cpu_percent = None
+                    previous = None
+                await asyncio.sleep(1)
+        except asyncio.CancelledError:
+            raise
+
+    async def stop_cpu_poller(self):
+        if self.cpu_poller:
+            self.cpu_poller.cancel()
+            try:
+                await self.cpu_poller
+            except asyncio.CancelledError:
+                pass
+            self.cpu_poller = None
+        self.cpu_percent = None
 
     async def poll(self):
         try:
@@ -288,6 +389,11 @@ class State:
         self.save()
 
     async def shutdown(self):
+        await self.stop_cpu_poller()
+        await self.ros.stop()
+        if self.trajectory_file is not None:
+            self.trajectory_file.close()
+            self.trajectory_file = None
         await self.jobs.shutdown()
         if self.active:
             try:
@@ -352,6 +458,12 @@ def create_app(workspace=None):
                     service.vio = await asyncio.to_thread(service.device.vio_status)
                 except (OSError, RuntimeError):
                     service.vio = {'state': 'unknown'}
+                service.cpu_poller = asyncio.create_task(service.poll_cpu())
+                if service.vio['state'] in ('running', 'external'):
+                    try:
+                        await service.ros.start()
+                    except (OSError, RuntimeError) as exc:
+                        service.ros_error = str(exc)
                 return info
             except paramiko_error_types() as exc:
                 raise HTTPException(400, f'SSH 连接失败：{type(exc).__name__}') from exc
@@ -363,9 +475,12 @@ def create_app(workspace=None):
             if service.active or service.transfer_tasks:
                 raise ValueError('请等待录制保存和数据取回完成')
             await service.stop_poller()
+            await service.stop_cpu_poller()
+            await service.ros.stop()
             await asyncio.to_thread(service.device.disconnect)
             service.recorder = service.frame = None
             service.vio = {'state': 'disconnected'}
+            service.on_tracking(False)
             return {'ok': True}
 
     @app.get('/api/camera/settings')
@@ -404,10 +519,17 @@ def create_app(workspace=None):
         async with service.operation:
             if service.active or service.transfer_tasks:
                 raise ValueError('请先停止录制并等待数据取回完成')
-            await service.stop_poller()
-            await asyncio.to_thread(service.device.close_session)
-            service.recorder = service.frame = None
-            service.vio = await asyncio.to_thread(service.device.vio_start)
+            await service.ros.start()
+            service.ros_error = ''
+            try:
+                await service.stop_poller()
+                await asyncio.to_thread(service.device.close_session)
+                service.recorder = service.frame = None
+                service.reset_trajectory()
+                service.vio = await asyncio.to_thread(service.device.vio_start)
+            except Exception:
+                await service.ros.stop()
+                raise
             return service.vio
 
     @app.post('/api/vio/stop')
@@ -415,6 +537,8 @@ def create_app(workspace=None):
         service = request.app.state.console
         async with service.operation:
             service.vio = await asyncio.to_thread(service.device.vio_stop)
+            await service.ros.stop()
+            service.on_tracking(False)
             return service.vio
 
     @app.post('/api/vio/deploy')
@@ -638,6 +762,55 @@ def create_app(workspace=None):
                 await asyncio.sleep(.2)
         except (WebSocketDisconnect, OSError, TimeoutError, RuntimeError):
             pass
+
+    @app.websocket('/api/vio/trajectory')
+    async def trajectory(websocket: WebSocket):
+        origin = websocket.headers.get('origin')
+        if origin and urlparse(origin).hostname not in ('127.0.0.1', 'localhost', '::1'):
+            await websocket.close(code=1008)
+            return
+        await websocket.accept()
+        service = websocket.app.state.console
+        session = None
+        reader = None
+        revision = -1
+        last_sent = 0.0
+        try:
+            while True:
+                reset = session != service.pose_session
+                if reset:
+                    if reader is not None:
+                        reader.close()
+                    session = service.pose_session
+                    reader = None
+                if reader is None and service.trajectory_path.is_file():
+                    reader = service.trajectory_path.open('r', encoding='utf-8')
+                points = []
+                if reader is not None:
+                    for _ in range(512):
+                        line = reader.readline()
+                        if not line:
+                            break
+                        points.append(json.loads(line))
+                if reset or points or service.pose_revision != revision or time.monotonic() - last_sent >= 2:
+                    await asyncio.wait_for(websocket.send_json(dict(
+                        reset=reset, points=points, tracking=service.tracking,
+                        frame=service.last_pose_frame, session=session)), 3)
+                    revision = service.pose_revision
+                    last_sent = time.monotonic()
+                await asyncio.sleep(0 if len(points) == 512 else .05)
+        except (WebSocketDisconnect, OSError, TimeoutError, RuntimeError):
+            pass
+        finally:
+            if reader is not None:
+                reader.close()
+
+    @app.get('/api/vio/trajectory/download')
+    async def trajectory_download(request: Request):
+        service = request.app.state.console
+        if not service.trajectory_path.is_file():
+            raise HTTPException(404, '当前没有可下载的 VIO 轨迹')
+        return FileResponse(service.trajectory_path, filename=f'vio-{service.pose_session}.jsonl')
 
     dist = Path(os.environ.get('TIDE_FRONTEND_DIST', ROOT / 'frontend/dist'))
     if dist.is_dir():

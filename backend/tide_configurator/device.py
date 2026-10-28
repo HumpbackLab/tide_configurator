@@ -2,6 +2,7 @@
 import base64
 import errno
 import hashlib
+import ipaddress
 import json
 from pathlib import Path, PurePosixPath
 import re
@@ -159,8 +160,13 @@ class Device:
                 raise RuntimeError('启动 VIO 前请先关闭采集预览')
             if self.vio_status()['state'] != 'stopped':
                 raise RuntimeError('VIO 已在运行')
+            agent_ip = self.client.get_transport().sock.getsockname()[0]
+            try:
+                ipaddress.IPv4Address(agent_ip)
+            except ipaddress.AddressValueError as exc:
+                raise RuntimeError('ROS 2 Agent 需要电脑到设备链路的 IPv4 地址') from exc
             self._board_script('vio-start.sh', self.board.vio, self.board.vio_config,
-                               self.board.vio_output, self.board.camera_settings, timeout=20)
+                               self.board.vio_output, self.board.camera_settings, agent_ip, timeout=20)
             status = self.vio_status()
             if status['state'] == 'stopped':
                 raise RuntimeError('VIO 启动后立即退出；请查看设备日志')
@@ -170,6 +176,17 @@ class Device:
         with self.lock:
             self._board_script('vio-stop.sh', self.board.vio, timeout=25)
             return self.vio_status()
+
+    def cpu_counters(self):
+        with self.lock:
+            if not self.client:
+                raise RuntimeError('请先连接设备')
+            first = self.execute(['cat', '/proc/stat']).splitlines()[0].split()
+            if first[0] != 'cpu' or len(first) < 5:
+                raise RuntimeError('设备返回了无效的 CPU 统计')
+            ticks = [int(value) for value in first[1:]]
+            # guest/guest_nice are already included in user/nice by Linux.
+            return sum(ticks[:8]), ticks[3] + (ticks[4] if len(ticks) > 4 else 0)
 
     def vio_deploy(self, package: Path, progress):
         with self.lock:

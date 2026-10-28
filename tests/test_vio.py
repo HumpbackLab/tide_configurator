@@ -5,7 +5,8 @@ from pathlib import Path
 import struct
 import subprocess
 import tarfile
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
+from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
 import pytest
@@ -96,11 +97,81 @@ def test_upload_and_vio_controls_are_separate_from_recording(tmp_path):
         state.device.close_session = MagicMock()
         state.device.vio_start = lambda: {'state': 'running', 'pid': 42}
         state.device.vio_stop = lambda: {'state': 'stopped'}
+        state.ros.start = AsyncMock()
+        state.ros.stop = AsyncMock()
         state.recorder = {'state': 'preview'}
         assert client.post('/api/vio/start').json()['pid'] == 42
         state.device.close_session.assert_called_once()
         assert state.recorder is None
         assert client.post('/api/vio/stop').json()['state'] == 'stopped'
+
+
+def pose(stamp, x, frame='odom'):
+    return SimpleNamespace(
+        header=SimpleNamespace(frame_id=frame, stamp=SimpleNamespace(sec=stamp, nanosec=0)),
+        pose=SimpleNamespace(
+            position=SimpleNamespace(x=x, y=0.0, z=0.0),
+            orientation=SimpleNamespace(x=0.0, y=0.0, z=0.0, w=1.0)))
+
+
+def test_ros_trajectory_websocket_tracks_segments_and_resets(tmp_path):
+    with TestClient(create_app(tmp_path / 'workspace')) as client:
+        state = client.app.state.console
+        state.on_pose(pose(1, 0.0))
+        state.on_pose(pose(2, 1.0))
+        with client.websocket_connect('/api/vio/trajectory') as socket:
+            initial = socket.receive_json()
+            assert initial['reset'] and len(initial['points']) == 2
+            assert client.get('/api/vio/trajectory/download').status_code == 200
+            state.on_tracking(False)
+            state.on_pose(pose(3, 2.0))
+            update = socket.receive_json()
+            assert update['points'][0]['segment'] == 1
+            first_file = state.trajectory_path
+            state.on_pose(pose(1, 0.0))  # Timestamp went backwards: new VIO session.
+            for _ in range(3):
+                reset = socket.receive_json()
+                if reset['reset']:
+                    break
+            assert reset['reset'] and len(reset['points']) == 1
+            assert len(first_file.read_text().splitlines()) == 3
+
+
+def test_trajectory_keeps_and_streams_more_than_3000_ros_poses(tmp_path):
+    with TestClient(create_app(tmp_path / 'workspace')) as client:
+        state = client.app.state.console
+        for stamp in range(3205):
+            state.on_pose(pose(stamp, float(stamp)))
+        assert state.pose_seq == 3205
+        assert len(state.trajectory_path.read_text().splitlines()) == 3205
+        response = client.get('/api/vio/trajectory/download')
+        assert response.status_code == 200
+        assert len(response.content.splitlines()) == 3205
+        with client.websocket_connect('/api/vio/trajectory') as socket:
+            received = []
+            while len(received) < 3205:
+                packet = socket.receive_json()
+                received.extend(packet['points'])
+            assert [received[0]['seq'], received[-1]['seq']] == [1, 3205]
+
+
+def test_device_cpu_counters_are_read_from_proc_stat(tmp_path):
+    device = Device(tmp_path)
+    device.client = MagicMock()
+    device.execute = lambda args: 'cpu  10 0 20 60 10 0 0 0 0 0\ncpu0 10 0 20 60 10\n'
+    assert device.cpu_counters() == (100, 70)
+
+
+def test_vio_start_passes_the_computer_side_ipv4_to_board(tmp_path):
+    device = Device(tmp_path)
+    device.client = MagicMock()
+    device.client.get_transport().sock.getsockname.return_value = ('192.168.123.2', 43210)
+    device.vio_status = MagicMock(side_effect=[{'state': 'stopped'}, {'state': 'running'}])
+    device._board_script = MagicMock()
+    assert device.vio_start()['state'] == 'running'
+    call = device._board_script.call_args
+    assert call.args[-1] == '192.168.123.2'
+    assert call.args[0] == 'vio-start.sh'
 
 
 def test_apply_requires_completed_calibration_and_stopped_vio(tmp_path):

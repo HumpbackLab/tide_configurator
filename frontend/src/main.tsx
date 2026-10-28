@@ -26,6 +26,9 @@ import {
 } from "lucide-react";
 import "./style.css";
 import { TargetBoard, type TargetSpec } from "./TargetBoard";
+const VioTrajectory = React.lazy(async () => ({
+  default: (await import("./VioTrajectory")).VioTrajectory,
+}));
 
 type Capture = {
   id: string;
@@ -107,6 +110,8 @@ type Snapshot = {
   preview_url?: string;
   vio?: { state: string; pid?: number; path?: string; config?: string; config_sha256?: string | null; log?: string; last_error?: string };
   vio_transfer?: { status: string; stage: string; bytes: number; total: number; error?: string; backup?: string };
+  cpu_percent?: number | null;
+  ros?: { connected: boolean; error: string };
   error: string;
   captures: Capture[];
   jobs: Job[];
@@ -1089,9 +1094,12 @@ function App() {
             <div>
               <p className="eyebrow">VIO RUNTIME</p>
               <h2>部署并运行 SchurVINS</h2>
-              <p>上传板型对应的发布包，在设备上启动或停止 VIO。</p>
+              <p>部署 SchurVINS，查看 ROS 2 实时轨迹与设备 CPU 占用率。</p>
             </div>
           </div>
+          <React.Suspense fallback={<section className="panel vio-trajectory-panel vio-trajectory-loading">正在载入轨迹视图…</section>}>
+            <VioTrajectory cpuPercent={state.cpu_percent} rosError={state.ros?.error} />
+          </React.Suspense>
           <div className="vio-grid">
             <section className="panel vio-panel">
               <div className="panel-heading">

@@ -326,6 +326,44 @@ h1 {
   gap: 18px;
   margin-bottom: 28px;
 }
+.vio-trajectory-panel { margin-bottom: 18px; overflow: hidden; }
+.vio-trajectory-loading { padding: 24px; color: var(--muted); }
+.vio-trajectory-stage { position: relative; height: clamp(330px, 48vw, 560px); min-height: 330px; }
+.vio-trajectory-stage canvas { display: block; width: 100%; height: 100%; }
+.vio-trajectory-overlay {
+  position: absolute; z-index: 1; top: 16px; left: 16px;
+  display: flex; flex-wrap: wrap; gap: 8px; pointer-events: none;
+}
+.vio-trajectory-overlay span {
+  display: flex; gap: 7px; align-items: center; padding: 7px 10px;
+  color: #53627a; background: rgba(255,255,255,.92);
+  border: 1px solid #dbe3ed; border-radius: 5px; font-size: 11px;
+}
+.vio-trajectory-overlay strong { color: #142a48; font-variant-numeric: tabular-nums; }
+.vio-pose-readout {
+  position: absolute; z-index: 1; right: 16px; bottom: 16px;
+  display: grid; gap: 7px; width: min(330px, calc(100% - 32px));
+  padding: 13px; border: 1px solid #dbe3ed; border-radius: 5px;
+  background: rgba(255,255,255,.94); pointer-events: none;
+}
+.vio-pose-readout > span { color: #68788e; font-size: 10px; }
+.vio-pose-readout > div { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 7px; }
+.vio-pose-readout label {
+  display: grid; gap: 4px; padding: 7px 8px; min-width: 0;
+  color: #68788e; background: #f3f6fb; border-radius: 3px; font-size: 10px;
+}
+.vio-pose-readout strong { color: #142a48; font-size: 13px; font-variant-numeric: tabular-nums; }
+.vio-trajectory-footer {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 12px 18px; border-top: 1px solid var(--line);
+  color: var(--muted); font-size: 11px;
+}
+.vio-trajectory-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.vio-trajectory-error { margin: 0 18px 14px; font-size: 11px; }
+@media (max-width: 600px) {
+  .vio-trajectory-stage { height: 470px; }
+  .vio-trajectory-footer { align-items: flex-start; flex-direction: column; }
+}
 .vio-panel {
   min-width: 0;
   display: flex;
