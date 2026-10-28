@@ -57,6 +57,8 @@ npm --prefix frontend run build
 | `TIDE_PORT` | 本地网页端口 | `8765` |
 | `TIDE_WORKSPACE` | 本地数据目录 | `./data` |
 | `KALIBR_IMAGE` | 标定容器镜像 | `localhost/tidesense-calibration:noetic` |
+| `TIDE_CONFIGURATOR_VENV` | Python 虚拟环境目录 | `./.venv` |
+| `TIDE_FRONTEND_DIST` | 已构建的前端页面目录 | `./frontend/dist` |
 
 ## 开发
 

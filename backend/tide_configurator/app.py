@@ -639,7 +639,7 @@ def create_app(workspace=None):
         except (WebSocketDisconnect, OSError, TimeoutError, RuntimeError):
             pass
 
-    dist = ROOT / 'frontend/dist'
+    dist = Path(os.environ.get('TIDE_FRONTEND_DIST', ROOT / 'frontend/dist'))
     if dist.is_dir():
         app.mount('/', StaticFiles(directory=dist, html=True), name='frontend')
     return app
