@@ -17,7 +17,7 @@ from tide_configurator.device import Device
 from tide_configurator.vio import validate_package
 
 
-ROOT = 'schurvins-gcc11-static-micro-ros'
+ROOT = 'schurvins-gcc11-native-dds'
 
 
 def test_stopped_vio_surfaces_the_last_program_error(tmp_path):
@@ -83,7 +83,7 @@ def test_upload_and_vio_controls_are_separate_from_recording(tmp_path):
         def deploy(path, progress):
             calls.append(path.read_bytes())
             progress('device_upload', path.stat().st_size, path.stat().st_size)
-            return {'path': '/mnt/data/schurvins-gcc11-static-micro-ros', 'backup': '/mnt/data/backup'}
+            return {'path': '/mnt/data/schurvins-gcc11-native-dds', 'backup': '/mnt/data/backup'}
         state.device.vio_deploy = deploy
         body = archive(release())
         response = client.post('/api/vio/deploy', content=body,
@@ -162,16 +162,16 @@ def test_device_cpu_counters_are_read_from_proc_stat(tmp_path):
     assert device.cpu_counters() == (100, 70)
 
 
-def test_vio_start_passes_the_computer_side_ipv4_to_board(tmp_path):
+def test_vio_start_uses_native_dds_without_agent_address(tmp_path):
     device = Device(tmp_path)
     device.client = MagicMock()
-    device.client.get_transport().sock.getsockname.return_value = ('192.168.123.2', 43210)
     device.vio_status = MagicMock(side_effect=[{'state': 'stopped'}, {'state': 'running'}])
     device._board_script = MagicMock()
     assert device.vio_start()['state'] == 'running'
     call = device._board_script.call_args
-    assert call.args[-1] == '192.168.123.2'
     assert call.args[0] == 'vio-start.sh'
+    assert call.args[1:] == (device.board.vio, device.board.vio_config,
+                            device.board.vio_output, device.board.camera_settings)
 
 
 def test_apply_requires_completed_calibration_and_stopped_vio(tmp_path):

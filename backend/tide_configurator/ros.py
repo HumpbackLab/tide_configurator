@@ -1,15 +1,7 @@
-"""Host ROS 2 Agent and subscriber for the browser VIO view."""
+"""Host ROS 2 subscriber for the browser VIO view."""
 import asyncio
 import os
-from pathlib import Path
-import socket
-import subprocess
 import threading
-
-
-SDK_ROOT = Path(__file__).resolve().parents[3]
-AGENT = SDK_ROOT / 'install/micro-ros/agent-install/lib/micro_ros_agent/micro_ros_agent'
-AGENT_PORT = 8888
 
 
 class RosTelemetry:
@@ -17,8 +9,6 @@ class RosTelemetry:
         self.workspace = workspace
         self.on_pose = on_pose
         self.on_tracking = on_tracking
-        self.agent = None
-        self.agent_log = None
         self.thread = None
         self.stop_event = threading.Event()
         self.ready = threading.Event()
@@ -29,39 +19,15 @@ class RosTelemetry:
         return self.thread is not None and self.thread.is_alive()
 
     async def start(self):
-        if self.running and (self.agent is None or self.agent.poll() is None):
+        if self.running:
             return
-        if self.thread is not None or self.agent is not None:
+        if self.thread is not None:
             await self.stop()
         if os.environ.get('ROS_VERSION') != '2':
             raise RuntimeError('未加载电脑端 ROS 2 环境；请通过 run.sh 启动 TideConfigurator')
-        if not AGENT.is_file():
-            raise RuntimeError('电脑端 micro-ROS Agent 未安装；请先构建 SDK 的 Agent')
         self.error = ''
         self.stop_event.clear()
         self.ready.clear()
-        probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        try:
-            probe.bind(('0.0.0.0', AGENT_PORT))
-            agent_needed = True
-        except OSError:
-            agent_needed = False  # Reuse an Agent already bound to the standard port.
-        finally:
-            probe.close()
-        if agent_needed:
-            self.agent_log = (self.workspace / 'micro-ros-agent.log').open('ab')
-            try:
-                self.agent = subprocess.Popen(
-                    [str(AGENT), 'udp4', '-p', str(AGENT_PORT)],
-                    stdout=self.agent_log, stderr=subprocess.STDOUT, start_new_session=True)
-            except Exception:
-                self.agent_log.close()
-                self.agent_log = None
-                raise
-            await asyncio.sleep(.3)
-            if self.agent.poll() is not None:
-                await self.stop()
-                raise RuntimeError('micro-ROS Agent 启动失败；请查看 micro-ros-agent.log')
         loop = asyncio.get_running_loop()
         self.thread = threading.Thread(target=self._subscribe, args=(loop,), daemon=True,
                                        name='tide-ros-subscriber')
@@ -114,15 +80,3 @@ class RosTelemetry:
         if self.thread is not None:
             await asyncio.to_thread(self.thread.join, 2)
             self.thread = None
-        if self.agent is not None:
-            if self.agent.poll() is None:
-                self.agent.terminate()
-                try:
-                    await asyncio.to_thread(self.agent.wait, 3)
-                except subprocess.TimeoutExpired:
-                    self.agent.kill()
-                    await asyncio.to_thread(self.agent.wait)
-            self.agent = None
-        if self.agent_log is not None:
-            self.agent_log.close()
-            self.agent_log = None

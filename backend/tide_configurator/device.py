@@ -2,7 +2,6 @@
 import base64
 import errno
 import hashlib
-import ipaddress
 import json
 from pathlib import Path, PurePosixPath
 import re
@@ -160,13 +159,8 @@ class Device:
                 raise RuntimeError('启动 VIO 前请先关闭采集预览')
             if self.vio_status()['state'] != 'stopped':
                 raise RuntimeError('VIO 已在运行')
-            agent_ip = self.client.get_transport().sock.getsockname()[0]
-            try:
-                ipaddress.IPv4Address(agent_ip)
-            except ipaddress.AddressValueError as exc:
-                raise RuntimeError('ROS 2 Agent 需要电脑到设备链路的 IPv4 地址') from exc
             self._board_script('vio-start.sh', self.board.vio, self.board.vio_config,
-                               self.board.vio_output, self.board.camera_settings, agent_ip, timeout=20)
+                               self.board.vio_output, self.board.camera_settings, timeout=20)
             status = self.vio_status()
             if status['state'] == 'stopped':
                 raise RuntimeError('VIO 启动后立即退出；请查看设备日志')

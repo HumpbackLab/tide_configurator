@@ -4,10 +4,6 @@ run=$1
 config=$2
 output=$3
 camera_settings=$4
-agent_ip=$5
-case "$agent_ip" in
-  *[!0-9.]*|'') echo 'Invalid computer IPv4 address for ROS 2 Agent' >&2; exit 1 ;;
-esac
 binary=${run%/*}/bin/schurvins_stereo
 pidfile=/run/tide-configurator-vio.pid
 console_state=/run/tide-configurator-vio.console
@@ -47,8 +43,6 @@ if [ "$previous" -gt 3 ]; then
   fi
 fi
 SCHUR_ROS=1; export SCHUR_ROS
-SCHUR_MICRO_ROS=1; export SCHUR_MICRO_ROS
-SCHUR_MICRO_ROS_AGENT=$agent_ip; export SCHUR_MICRO_ROS_AGENT
 SCHUR_PREDICTION=0; export SCHUR_PREDICTION
 TIDE_CAM_CONFIG_PATH=$camera_settings; export TIDE_CAM_CONFIG_PATH
 nohup setsid "$run" --vio "$config" auto "$output/poses.csv" 0 >"$output/vio.log" 2>&1 </dev/null &
