@@ -1,5 +1,7 @@
 # TideConfigurator
 
+简体中文 | [English](README.en.md)
+
 TideConfigurator 是运行在电脑上的 TideSense 配置工具。通过浏览器连接设备，完成相机与 IMU 数据录制、标定，以及 SchurVINS 的部署和运行管理。当前支持 SG2002 双目 TideSense。
 
 ## 功能
