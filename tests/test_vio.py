@@ -106,6 +106,26 @@ def test_upload_and_vio_controls_are_separate_from_recording(tmp_path):
         assert client.post('/api/vio/stop').json()['state'] == 'stopped'
 
 
+def test_vio_starts_when_host_ros_is_unavailable(tmp_path):
+    with TestClient(create_app(tmp_path / 'workspace')) as client:
+        state = client.app.state.console
+        state.device.info = {'connected': True, 'host': 'device'}
+        state.device.close_session = MagicMock()
+        state.device.vio_start = MagicMock(return_value={'state': 'running', 'pid': 42})
+        state.ros.start = AsyncMock(side_effect=RuntimeError('ROS 2 unavailable'))
+        state.ros.stop = AsyncMock()
+
+        response = client.post('/api/vio/start')
+
+        assert response.status_code == 200, response.text
+        assert response.json() == {'state': 'running', 'pid': 42}
+        state.device.vio_start.assert_called_once()
+        snapshot = client.get('/api/state').json()
+        assert snapshot['vio']['state'] == 'running'
+        assert not snapshot['ros']['connected']
+        assert snapshot['ros']['error'] == 'ROS 2 unavailable'
+
+
 def pose(stamp, x, frame='odom'):
     return SimpleNamespace(
         header=SimpleNamespace(frame_id=frame, stamp=SimpleNamespace(sec=stamp, nanosec=0)),

@@ -1,6 +1,5 @@
 """Host ROS 2 subscriber for the browser VIO view."""
 import asyncio
-import os
 import threading
 
 
@@ -23,8 +22,6 @@ class RosTelemetry:
             return
         if self.thread is not None:
             await self.stop()
-        if os.environ.get('ROS_VERSION') != '2':
-            raise RuntimeError('未加载电脑端 ROS 2 环境；请通过 run.sh 启动 TideConfigurator')
         self.error = ''
         self.stop_event.clear()
         self.ready.clear()

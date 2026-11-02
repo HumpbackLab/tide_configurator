@@ -2,7 +2,6 @@
 import hashlib
 import json
 import math
-import os
 from pathlib import Path
 import shutil
 
@@ -72,8 +71,6 @@ def calibrate(source, output, imu, target, lens, prepared=None):
         raise ValueError(f'Output already exists; choose a new directory: {output}')
     noise = noise_config(imu)
     check_target(target)
-    if os.geteuid() == 0:
-        raise ValueError('Use your normal user with rootless Podman, not sudo')
     runtime = Runtime()
     runtime.preflight()
     # Check host dependencies before creating a result directory or exporting a large bag.

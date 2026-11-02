@@ -29,15 +29,18 @@ Device program paths are configured in [`boards/tidesense/board.conf`](boards/ti
 Run these commands from the TideConfigurator project root:
 
 ```sh
-python3 -m venv .venv
-.venv/bin/pip install -r requirements.txt
+python3 -m pip install -r requirements.txt
 npm --prefix frontend ci
 npm --prefix frontend run build
 ./run.sh
 ```
 
+`run.sh` uses `python3` from the current `PATH`. If you want a virtual environment, create and activate
+one wherever you prefer, then install the dependencies into your chosen Python environment.
+
 Open <http://127.0.0.1:8765>, select the board type, and enter the device's SSH address and credentials.
-Node.js is only used to build the frontend. Before running calibration for the first time, run:
+Node.js is only used to build the frontend. A frontend build is optional when using the frontend
+development server or running only the API. Before running calibration for the first time, run:
 
 ```sh
 ./calibration/environment/build.sh
@@ -63,8 +66,11 @@ all received points, and displays position XYZ in meters and Roll/Pitch/Yaw in d
 quaternion using the ZYX Euler convention. The device's `poses.csv` retains the estimator's visual correction
 poses; the computer's JSONL file records the ROS 2 messages actually received.
 
-`./run.sh` loads the SDK's ROS 2 environment and uses ROS domain 0 by default. If ROS 2 is not installed
-on the computer, install it first or specify the environment with `TIDESENSE_ROS_SETUP`.
+Before using live VIO trajectories, load your ROS 2 environment yourself (for example,
+`source /opt/ros/<distro>/setup.bash`) and ensure that the current Python can import `rclpy`.
+`run.sh` inherits your ROS domain, DDS implementation, and DDS configuration.
+If host ROS 2 is unavailable, device-side VIO can still start; the page displays the trajectory subscription error.
+Other features do not require a ROS 2 environment.
 When started manually on the device, the native DDS version of SchurVINS publishes ROS 2 messages by
 default; set `SCHUR_ROS=0` to disable publishing.
 
@@ -87,7 +93,6 @@ Available environment variables:
 | `TIDE_PORT` | Local web server port | `8765` |
 | `TIDE_WORKSPACE` | Local data directory | `./data` |
 | `KALIBR_IMAGE` | Calibration container image | `localhost/tidesense-calibration:noetic` |
-| `TIDE_CONFIGURATOR_VENV` | Python virtual environment directory | `./.venv` |
 | `TIDE_FRONTEND_DIST` | Built frontend directory | `./frontend/dist` |
 
 ## Development
@@ -96,8 +101,8 @@ Run the backend with `./run.sh` and the frontend development server with `npm --
 Install the development dependencies and run the tests:
 
 ```sh
-.venv/bin/pip install -r requirements-dev.txt
-.venv/bin/python -m pytest tests -q
+python3 -m pip install -r requirements-dev.txt
+python3 -m pytest tests -q
 ```
 
 ## License

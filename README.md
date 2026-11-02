@@ -26,14 +26,15 @@ TideConfigurator 自带标定代码，运行时不需要 SG2002 SDK。设备程�
 在项目根目录执行：
 
 ```sh
-python3 -m venv .venv
-.venv/bin/pip install -r requirements.txt
+python3 -m pip install -r requirements.txt
 npm --prefix frontend ci
 npm --prefix frontend run build
 ./run.sh
 ```
 
-打开 <http://127.0.0.1:8765>，选择板型并输入设备的 SSH 地址和凭据。Node.js 只用于构建前端。首次运行标定前，执行：
+`run.sh` 使用当前 `PATH` 中的 `python3`。如需虚拟环境，自行创建并激活，位置不限；依赖安装到所选 Python 环境即可。
+
+打开 <http://127.0.0.1:8765>，选择板型并输入设备的 SSH 地址和凭据。Node.js 只用于构建前端；使用前端开发服务器或仅运行 API 时，无需先构建前端。首次运行标定前，执行：
 
 ```sh
 ./calibration/environment/build.sh
@@ -50,7 +51,7 @@ SchurVINS 默认使用原生 ROS 2 DDS，并发布 `/tidesense/pose` 和 `/tides
 
 配置器将 `SCHUR_PREDICTION=0` 传给 SchurVINS，使 ROS 2 只发布视觉校正频率的位姿（约 20 Hz）。每条收到的 ROS 2 位姿都按原时间戳写入电脑端 `data/vio-trajectories/<会话 ID>.jsonl`，不限制点数；VIO 页面可下载当前会话的完整记录。网页轨迹按块增量绘制，保留全部收到的点，并显示位置 XYZ（米）及四元数换算的 ZYX 欧拉角 Roll/Pitch/Yaw（度）。板端 `poses.csv` 仍保存估计器输出的视觉校正位姿；电脑端 JSONL 记录 ROS 2 实际收到的消息。
 
-`./run.sh` 会加载 SDK 的 ROS 2 环境，默认使用 ROS domain 0。电脑未安装 ROS 2 时，请先安装或通过 `TIDESENSE_ROS_SETUP` 指定环境。手动在设备上启动原生 DDS 版 SchurVINS 时默认发布 ROS 2 消息；`SCHUR_ROS=0` 可关闭。
+使用 VIO 实时轨迹前，自行加载所需的 ROS 2 环境（例如 `source /opt/ros/<发行版>/setup.bash`），并确保当前 Python 可以导入 `rclpy`。`run.sh` 沿用当前 ROS domain、DDS 实现及其配置。电脑端 ROS 2 不可用时，仍可启动板端 VIO，网页会显示轨迹订阅错误。其他功能无需 ROS 2 环境。手动在设备上启动原生 DDS 版 SchurVINS 时默认发布 ROS 2 消息；`SCHUR_ROS=0` 可关闭。
 
 标定使用 `scale-misalignment` IMU 模型。录制和标定结果默认保存在项目的 `data/` 目录。
 自动曝光上限保存在设备的 `/mnt/data/tide-configurator/camera.conf` 中，文件内容如 `exposure_max_us=1200`。可在录制设置中修改，也可用文本编辑器直接编辑；重启采集后生效。文件路径由板型配置指定。
@@ -66,7 +67,6 @@ SchurVINS 默认使用原生 ROS 2 DDS，并发布 `/tidesense/pose` 和 `/tides
 | `TIDE_PORT` | 本地网页端口 | `8765` |
 | `TIDE_WORKSPACE` | 本地数据目录 | `./data` |
 | `KALIBR_IMAGE` | 标定容器镜像 | `localhost/tidesense-calibration:noetic` |
-| `TIDE_CONFIGURATOR_VENV` | Python 虚拟环境目录 | `./.venv` |
 | `TIDE_FRONTEND_DIST` | 已构建的前端页面目录 | `./frontend/dist` |
 
 ## 开发
@@ -74,8 +74,8 @@ SchurVINS 默认使用原生 ROS 2 DDS，并发布 `/tidesense/pose` 和 `/tides
 后端运行 `./run.sh`；前端开发服务器运行 `npm --prefix frontend run dev`。安装开发依赖后运行测试：
 
 ```sh
-.venv/bin/pip install -r requirements-dev.txt
-.venv/bin/python -m pytest tests -q
+python3 -m pip install -r requirements-dev.txt
+python3 -m pytest tests -q
 ```
 
 ## 许可证

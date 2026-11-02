@@ -7,7 +7,7 @@ from tide_configurator.device import Device
 def test_tidesense_programs_are_device_paths(tmp_path):
     board = load_board('tidesense')
     assert [item.id for item in list_boards()] == ['tidesense']
-    assert board.recorder == '/usr/local/bin/tidesense_record'
+    assert board.recorder == '/mnt/data/tidesense-dataset/bin/tidesense_record'
     assert board.vio == '/mnt/data/schurvins-gcc11-native-dds/run.sh'
     assert Device(tmp_path).recorder_path == board.recorder
 

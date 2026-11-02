@@ -519,8 +519,11 @@ def create_app(workspace=None):
         async with service.operation:
             if service.active or service.transfer_tasks:
                 raise ValueError('请先停止录制并等待数据取回完成')
-            await service.ros.start()
             service.ros_error = ''
+            try:
+                await service.ros.start()
+            except (OSError, RuntimeError) as exc:
+                service.ros_error = str(exc)
             try:
                 await service.stop_poller()
                 await asyncio.to_thread(service.device.close_session)
