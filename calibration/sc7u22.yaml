@@ -1,0 +1,8 @@
+# Allan estimates for this recording; inspect allan-report.md and fit intervals.
+# null means unresolved/unsuitable, not zero. No automatic safety multiplier.
+rostopic: /tidesense/imu
+update_rate: 199.5227416020878
+gyroscope_noise_density: 0.001253427834534552
+gyroscope_random_walk: 4.450516959753275e-04
+accelerometer_noise_density: 0.013456558736400605
+accelerometer_random_walk: 0.002833135380475674
