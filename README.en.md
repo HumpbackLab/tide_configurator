@@ -58,6 +58,12 @@ The configurator subscribes directly on the computer; the device and computer mu
 and be able to discover each other. The browser receives trajectories over a local WebSocket, without
 connecting directly to ROS 2. CPU usage is read from the device's `/proc/stat` and updated once per second.
 
+When starting VIO, the configurator obtains both addresses from the current SSH connection,
+configures unicast DDS discovery, and forwards the host's `ROS_DOMAIN_ID` (default 0) to the device.
+No fixed IP or extra address entry is needed. The host defaults to Cyclone DDS and preserves explicit
+`RMW_IMPLEMENTATION` and `CYCLONEDDS_URI` settings. VIO continues after closing the browser;
+after a device reboot, start it again from the configurator. Boot autostart is not configured.
+
 The configurator passes `SCHUR_PREDICTION=0` to SchurVINS so that ROS 2 publishes poses at the visual
 correction rate only (approximately 20 Hz). Every received ROS 2 pose is written with its original timestamp
 to `data/vio-trajectories/<session-id>.jsonl` on the computer, with no point limit. The VIO page can download

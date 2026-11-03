@@ -1,6 +1,24 @@
 """Host ROS 2 subscriber for the browser VIO view."""
 import asyncio
+import os
 import threading
+from xml.etree.ElementTree import Element, SubElement, tostring
+
+
+def dds_configuration(local_address, peer_address):
+    root = Element('CycloneDDS')
+    domain = SubElement(root, 'Domain')
+    general = SubElement(domain, 'General')
+    interfaces = SubElement(general, 'Interfaces')
+    SubElement(interfaces, 'NetworkInterface', address=local_address)
+    SubElement(general, 'AllowMulticast').text = 'false'
+    SubElement(general, 'MaxMessageSize').text = '1400B'
+    SubElement(general, 'FragmentSize').text = '1200B'
+    discovery = SubElement(domain, 'Discovery')
+    SubElement(discovery, 'ParticipantIndex').text = 'auto'
+    peers = SubElement(discovery, 'Peers')
+    SubElement(peers, 'Peer', Address=peer_address)
+    return tostring(root, encoding='unicode')
 
 
 class RosTelemetry:
@@ -12,16 +30,25 @@ class RosTelemetry:
         self.stop_event = threading.Event()
         self.ready = threading.Event()
         self.error = ''
+        self._automatic_dds_uri = None
 
     @property
     def running(self):
         return self.thread is not None and self.thread.is_alive()
 
-    async def start(self):
+    async def start(self, device=None):
         if self.running:
             return
         if self.thread is not None:
             await self.stop()
+        if device is not None:
+            local_address, peer_address = device.ros_addresses()
+            os.environ.setdefault('RMW_IMPLEMENTATION', 'rmw_cyclonedds_cpp')
+            uri = os.environ.get('CYCLONEDDS_URI')
+            if (os.environ['RMW_IMPLEMENTATION'] == 'rmw_cyclonedds_cpp'
+                    and (not uri or uri == self._automatic_dds_uri)):
+                self._automatic_dds_uri = dds_configuration(local_address, peer_address)
+                os.environ['CYCLONEDDS_URI'] = self._automatic_dds_uri
         self.error = ''
         self.stop_event.clear()
         self.ready.clear()

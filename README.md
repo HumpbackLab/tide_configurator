@@ -49,6 +49,8 @@ npm --prefix frontend run build
 
 SchurVINS 默认使用原生 ROS 2 DDS，并发布 `/tidesense/pose` 和 `/tidesense/tracking`。配置器在电脑端直接订阅；设备和电脑需要处于可相互发现的同一 ROS domain。浏览器通过本地 WebSocket 接收轨迹，不直接连接 ROS 2。CPU 百分比来自设备 `/proc/stat`，每秒更新一次。
 
+通过配置器启动 VIO 时，会从当前 SSH 连接自动取得双方地址，配置 DDS 单播发现，并将电脑的 `ROS_DOMAIN_ID`（默认 0）传给设备，无需手填或固定 IP。电脑端默认使用 Cyclone DDS；显式设置的 `RMW_IMPLEMENTATION`、`CYCLONEDDS_URI` 会保留。设备关闭网页后仍继续运行 VIO，重启设备后需要重新点击启动，不配置开机自启。
+
 配置器将 `SCHUR_PREDICTION=0` 传给 SchurVINS，使 ROS 2 只发布视觉校正频率的位姿（约 20 Hz）。每条收到的 ROS 2 位姿都按原时间戳写入电脑端 `data/vio-trajectories/<会话 ID>.jsonl`，不限制点数；VIO 页面可下载当前会话的完整记录。网页轨迹按块增量绘制，保留全部收到的点，并显示位置 XYZ（米）及四元数换算的 ZYX 欧拉角 Roll/Pitch/Yaw（度）。板端 `poses.csv` 仍保存估计器输出的视觉校正位姿；电脑端 JSONL 记录 ROS 2 实际收到的消息。
 
 使用 VIO 实时轨迹前，自行加载所需的 ROS 2 环境（例如 `source /opt/ros/<发行版>/setup.bash`），并确保当前 Python 可以导入 `rclpy`。`run.sh` 沿用当前 ROS domain、DDS 实现及其配置。电脑端 ROS 2 不可用时，仍可启动板端 VIO，网页会显示轨迹订阅错误。其他功能无需 ROS 2 环境。手动在设备上启动原生 DDS 版 SchurVINS 时默认发布 ROS 2 消息；`SCHUR_ROS=0` 可关闭。

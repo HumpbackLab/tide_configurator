@@ -4,6 +4,10 @@ run=$1
 config=$2
 output=$3
 camera_settings=$4
+device_address=$5
+host_address=$6
+ROS_DOMAIN_ID=$7; export ROS_DOMAIN_ID
+PATH=/usr/sbin:/usr/bin:/sbin:/bin:$PATH; export PATH
 binary=${run%/*}/bin/schurvins_stereo
 pidfile=/run/tide-configurator-vio.pid
 console_state=/run/tide-configurator-vio.console
@@ -28,6 +32,24 @@ for process in /proc/[0-9]*; do
 done
 restore_console
 mkdir -p "$output"
+# Use unicast discovery on the SSH link: this board's kernel cannot join IPv4
+# multicast groups, and host DDS may otherwise select a VPN/container interface.
+case "$device_address$host_address" in
+  *[!0-9a-fA-F.:]*) echo 'Invalid DDS address' >&2; exit 1 ;;
+esac
+cat >"$output/cyclonedds.xml" <<EOF
+<CycloneDDS><Domain>
+  <General>
+    <Interfaces><NetworkInterface address="$device_address"/></Interfaces>
+    <AllowMulticast>false</AllowMulticast>
+    <MaxMessageSize>1400B</MaxMessageSize><FragmentSize>1200B</FragmentSize>
+  </General>
+  <Discovery><ParticipantIndex>auto</ParticipantIndex>
+    <Peers><Peer Address="$host_address"/></Peers>
+  </Discovery>
+</Domain></CycloneDDS>
+EOF
+CYCLONEDDS_URI=file://$output/cyclonedds.xml; export CYCLONEDDS_URI
 # The board boots with all ISP warnings mirrored to a 115200 baud serial console.
 # That synchronous output delays SC7U22 SPI reads beyond their 5 ms deadline.
 # Keep messages in dmesg while VIO runs, then restore the console setting.

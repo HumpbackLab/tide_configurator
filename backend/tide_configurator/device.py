@@ -3,6 +3,8 @@ import base64
 import errno
 import hashlib
 import json
+import os
+from ipaddress import ip_address
 from pathlib import Path, PurePosixPath
 import re
 import shlex
@@ -153,14 +155,26 @@ class Device:
                     pass  # No VIO run has written a log yet.
             return result
 
+    def ros_addresses(self):
+        if not self.client:
+            raise ConnectionError('请先连接设备')
+        connection = self.client.get_transport().sock
+        return (str(ip_address(connection.getsockname()[0])),
+                str(ip_address(connection.getpeername()[0])))
+
     def vio_start(self):
         with self.lock:
             if self.remote:
                 raise RuntimeError('启动 VIO 前请先关闭采集预览')
             if self.vio_status()['state'] != 'stopped':
                 raise RuntimeError('VIO 已在运行')
+            local_address, peer_address = self.ros_addresses()
+            domain = int(os.environ.get('ROS_DOMAIN_ID', '0'))
+            if not 0 <= domain <= 232:
+                raise ValueError('ROS_DOMAIN_ID 必须在 0..232 之间')
             self._board_script('vio-start.sh', self.board.vio, self.board.vio_config,
-                               self.board.vio_output, self.board.camera_settings, timeout=20)
+                               self.board.vio_output, self.board.camera_settings,
+                               peer_address, local_address, domain, timeout=20)
             status = self.vio_status()
             if status['state'] == 'stopped':
                 raise RuntimeError('VIO 启动后立即退出；请查看设备日志')

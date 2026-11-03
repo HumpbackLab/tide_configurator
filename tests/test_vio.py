@@ -1,3 +1,4 @@
+import asyncio
 import io
 import hashlib
 import json
@@ -14,6 +15,7 @@ import pytest
 from tide_configurator.app import create_app
 from tide_configurator.boards import load_board
 from tide_configurator.device import Device
+from tide_configurator.ros import RosTelemetry
 from tide_configurator.vio import validate_package
 
 
@@ -182,16 +184,62 @@ def test_device_cpu_counters_are_read_from_proc_stat(tmp_path):
     assert device.cpu_counters() == (100, 70)
 
 
-def test_vio_start_uses_native_dds_without_agent_address(tmp_path):
+def test_vio_start_uses_ssh_addresses_and_host_ros_domain(tmp_path, monkeypatch):
     device = Device(tmp_path)
     device.client = MagicMock()
+    connection = device.client.get_transport.return_value.sock
+    connection.getsockname.return_value = ('192.168.42.5', 43210)
+    connection.getpeername.return_value = ('192.168.42.99', 22)
+    monkeypatch.setenv('ROS_DOMAIN_ID', '37')
     device.vio_status = MagicMock(side_effect=[{'state': 'stopped'}, {'state': 'running'}])
     device._board_script = MagicMock()
     assert device.vio_start()['state'] == 'running'
     call = device._board_script.call_args
     assert call.args[0] == 'vio-start.sh'
     assert call.args[1:] == (device.board.vio, device.board.vio_config,
-                            device.board.vio_output, device.board.camera_settings)
+                            device.board.vio_output, device.board.camera_settings,
+                            '192.168.42.99', '192.168.42.5', 37)
+
+
+def test_ros_discovery_updates_after_reconnecting_to_another_device(tmp_path, monkeypatch):
+    import os
+    from xml.etree.ElementTree import fromstring
+
+    monkeypatch.delenv('CYCLONEDDS_URI', raising=False)
+    monkeypatch.delenv('RMW_IMPLEMENTATION', raising=False)
+    telemetry = RosTelemetry(tmp_path, lambda msg: None, lambda msg: None)
+    device = MagicMock()
+    device.ros_addresses.return_value = ('192.168.42.5', '192.168.42.99')
+    def subscribe(loop):
+        telemetry.ready.set()
+        telemetry.stop_event.wait()
+    telemetry._subscribe = subscribe
+
+    async def check():
+        await telemetry.start(device)
+        try:
+            xml = fromstring(os.environ['CYCLONEDDS_URI'])
+            assert xml.find('.//NetworkInterface').get('address') == '192.168.42.5'
+            assert xml.find('.//Peer').get('Address') == '192.168.42.99'
+            assert xml.find('.//ParticipantIndex').text == 'auto'
+        finally:
+            await telemetry.stop()
+        device.ros_addresses.return_value = ('10.0.0.2', '10.0.0.99')
+        await telemetry.start(device)
+        try:
+            xml = fromstring(os.environ['CYCLONEDDS_URI'])
+            assert xml.find('.//NetworkInterface').get('address') == '10.0.0.2'
+            assert xml.find('.//Peer').get('Address') == '10.0.0.99'
+        finally:
+            await telemetry.stop()
+        monkeypatch.setenv('CYCLONEDDS_URI', 'file:///custom.xml')
+        await telemetry.start(device)
+        try:
+            assert os.environ['CYCLONEDDS_URI'] == 'file:///custom.xml'
+        finally:
+            await telemetry.stop()
+
+    asyncio.run(check())
 
 
 def test_apply_requires_completed_calibration_and_stopped_vio(tmp_path):

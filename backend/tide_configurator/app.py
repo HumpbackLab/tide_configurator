@@ -461,7 +461,7 @@ def create_app(workspace=None):
                 service.cpu_poller = asyncio.create_task(service.poll_cpu())
                 if service.vio['state'] in ('running', 'external'):
                     try:
-                        await service.ros.start()
+                        await service.ros.start(service.device)
                     except (OSError, RuntimeError) as exc:
                         service.ros_error = str(exc)
                 return info
@@ -521,7 +521,7 @@ def create_app(workspace=None):
                 raise ValueError('请先停止录制并等待数据取回完成')
             service.ros_error = ''
             try:
-                await service.ros.start()
+                await service.ros.start(service.device)
             except (OSError, RuntimeError) as exc:
                 service.ros_error = str(exc)
             try:
