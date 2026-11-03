@@ -1894,6 +1894,9 @@ html {
 .stereo-view img { display: block; width: 100%; height: 100%; object-fit: contain; }
 .stereo-view .stereo-label-1 { left: calc(50% + 12px); }
 .stereo-view .camera-empty { height: 100%; }
+.camera-unavailable { position: absolute; inset: 0 auto 0 0; width: 50%; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; color: #999; background: #101317; pointer-events: none; }
+.camera-unavailable-1 { left: 50%; }
+.camera-unavailable small { font-size: 11px; }
 
 .transfer-status { padding: 12px 0; display: grid; gap: 8px; min-width: 0; }
 .transfer-stages { display: flex; flex-wrap: wrap; gap: 12px; color: #999; font-size: 10px; }

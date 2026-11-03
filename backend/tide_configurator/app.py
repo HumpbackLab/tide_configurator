@@ -29,6 +29,8 @@ from . import target
 from .jobs import Jobs, write_json, tail
 from .ros import RosTelemetry
 
+CONNECTION_TIMEOUT = 4
+
 
 class Connect(BaseModel):
     board: str = Field(default='tidesense', pattern=r'^[a-z][a-z0-9_]*$')
@@ -223,21 +225,61 @@ class State:
 
     async def poll_cpu(self):
         previous = None
+        client = self.device.client
         try:
-            while self.device.info.get('connected'):
+            while self.device.info.get('connected') and self.device.client is client:
                 try:
-                    current = await asyncio.to_thread(self.device.cpu_counters)
+                    current = await asyncio.wait_for(asyncio.to_thread(self.device.cpu_counters), CONNECTION_TIMEOUT)
                     if previous is not None and current[0] > previous[0]:
                         total = current[0] - previous[0]
                         idle = current[1] - previous[1]
                         self.cpu_percent = round(max(0, min(100, 100 * (total - idle) / total)), 1)
                     previous = current
-                except (OSError, RuntimeError, ValueError, IndexError):
+                except (OSError, EOFError) + paramiko_error_types():
+                    await self.connection_lost(client)
+                    return
+                except (RuntimeError, ValueError, IndexError):
                     self.cpu_percent = None
                     previous = None
                 await asyncio.sleep(1)
         except asyncio.CancelledError:
             raise
+
+    async def connection_lost(self, client):
+        # Closing the old transport first releases any in-flight SSH operation
+        # holding the operation lock. Do not send commands over a dead link.
+        if client is None or self.device.client is not client:
+            return
+        transport = client.get_transport()
+        if transport:
+            await asyncio.to_thread(transport.close)
+        async with self.operation:
+            if self.device.client is not client:
+                return
+            self.device.drop_connection()
+            self.error = '设备连接已中断，请检查连接后重新连接。'
+            self.capture_error = ''
+            self.recorder = self.frame = self.cpu_percent = None
+            self.vio = {'state': 'disconnected'}
+            self.on_tracking(False)
+            if self.active:
+                self.capture(self.active).update(status='interrupted', error=self.error)
+                self.active = None
+                self.save()
+            downloads = []
+            for identifier, progress in self.transfers.items():
+                if progress.get('status') == 'running' and progress.get('stage') == 'download':
+                    progress.update(status='failed', error=self.error)
+                    downloads.extend(task for task in self.transfer_tasks if task.get_name() == identifier)
+            for task in downloads:
+                task.cancel()
+            if downloads:
+                await asyncio.gather(*downloads, return_exceptions=True)
+                self.transfer_tasks.difference_update(downloads)
+            await self.stop_poller()
+            await self.ros.stop()
+            if self.cpu_poller is asyncio.current_task():
+                self.cpu_poller = None
 
     async def stop_cpu_poller(self):
         if self.cpu_poller:
@@ -260,6 +302,8 @@ class State:
                     continue
                 self.recorder = message
                 self.frame = {key: message[key] for key in ('sequence', 'width', 'height', 'left_ns', 'right_ns')} if message.get('width') else None
+                if self.frame is not None:
+                    self.frame['camera_mask'] = message.get('camera_mask', 3)
                 self.error = ''
                 if self.active and message.get('recording_id') == self.active:
                     item = self.capture(self.active)
@@ -276,6 +320,11 @@ class State:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
+            client = self.device.client
+            transport = client.get_transport() if client else None
+            if client and (transport is None or not transport.is_active()):
+                await self.connection_lost(client)
+                return
             self.error, failed = await asyncio.to_thread(self.device.failure, str(exc))
             self.recorder = None
             self.frame = None
@@ -287,6 +336,9 @@ class State:
 
     async def stop_poller(self):
         if self.poller:
+            if self.poller is asyncio.current_task():
+                self.poller = None
+                return
             self.poller.cancel()
             try:
                 await self.poller
@@ -308,7 +360,7 @@ class State:
             raise ValueError('请连接录制所在的设备')
         progress = {'status': 'running', 'stage': 'download', 'bytes': 0, 'total': 0, 'error': '', 'speed_bps': 0, 'frames': 0, 'pairs': 0, 'cached': False}
         self.transfers[identifier] = progress
-        task = asyncio.create_task(self._retrieve(item, progress))
+        task = asyncio.create_task(self._retrieve(item, progress), name=identifier)
         self.transfer_tasks.add(task)
         task.add_done_callback(self.transfer_tasks.discard)
 

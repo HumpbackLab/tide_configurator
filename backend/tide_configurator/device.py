@@ -100,7 +100,10 @@ class Device:
             return self.camera_settings()
 
     def execute(self, arguments):
-        _, output, error = self.client.exec_command(shlex.join(arguments), timeout=15)
+        client = self.client
+        if not client:
+            raise ConnectionError('设备连接已中断，请重新连接')
+        _, output, error = client.exec_command(shlex.join(arguments), timeout=15)
         data = output.read().decode(errors='replace')
         errors = error.read().decode(errors='replace')
         if output.channel.recv_exit_status():
@@ -186,15 +189,14 @@ class Device:
             return self.vio_status()
 
     def cpu_counters(self):
-        with self.lock:
-            if not self.client:
-                raise RuntimeError('请先连接设备')
-            first = self.execute(['cat', '/proc/stat']).splitlines()[0].split()
-            if first[0] != 'cpu' or len(first) < 5:
-                raise RuntimeError('设备返回了无效的 CPU 统计')
-            ticks = [int(value) for value in first[1:]]
-            # guest/guest_nice are already included in user/nice by Linux.
-            return sum(ticks[:8]), ticks[3] + (ticks[4] if len(ticks) > 4 else 0)
+        # The heartbeat uses its own SSH channel, independently of long device
+        # operations. Its caller closes the transport if the probe times out.
+        first = self.execute(['cat', '/proc/stat']).splitlines()[0].split()
+        if first[0] != 'cpu' or len(first) < 5:
+            raise RuntimeError('设备返回了无效的 CPU 统计')
+        ticks = [int(value) for value in first[1:]]
+        # guest/guest_nice are already included in user/nice by Linux.
+        return sum(ticks[:8]), ticks[3] + (ticks[4] if len(ticks) > 4 else 0)
 
     def vio_deploy(self, package: Path, progress):
         with self.lock:
@@ -286,7 +288,8 @@ class Device:
                 raise RuntimeError('请先断开当前设备')
             board = load_board(board_id)
             client = paramiko.SSHClient()
-            known_hosts = self.workspace / 'known_hosts'
+            known_hosts = Path.home() / '.ssh' / 'known_hosts'
+            known_hosts.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
             if known_hosts.exists():
                 client.load_host_keys(str(known_hosts))
             client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
@@ -415,7 +418,9 @@ class Device:
                     if not imu.startswith('/dev/iio:device') or '\n' in imu:
                         raise RuntimeError(f'没有找到 {self.board.imu_name.upper()} IMU')
                     arguments += ['--imu', imu, '--width', str(width), '--height', str(height)]
-                command = shlex.join(['env', 'TIDE_CAM_CONFIG_PATH=' + self.board.camera_settings] + arguments)
+                # Dropbear's non-login PATH omits /sbin, where SDK devmem lives.
+                command = shlex.join(['env', 'PATH=/usr/sbin:/usr/bin:/sbin:/bin',
+                                      'TIDE_CAM_CONFIG_PATH=' + self.board.camera_settings] + arguments)
                 self.daemon = self.client.get_transport().open_session()
                 self.daemon.exec_command('exec ' + command + ' > ' + shlex.quote(remote + '/session.log') + ' 2>&1')
                 deadline = time.monotonic() + 25
@@ -596,6 +601,12 @@ class Device:
                 sftp.close()
 
     def retrieve(self, remote, local, progress, expected_id=None):
+        client = self.client
+        report = progress
+        def progress(done, total):
+            if self.client is not client:
+                raise ConnectionError('设备连接已中断，请重新连接')
+            report(done, total)
         self._ensure_http()
         token = uuid.uuid4().hex
         authorized = False
@@ -636,7 +647,7 @@ class Device:
                 raise RuntimeError('设备上的临时录制已被替换，无法取回所选录制')
             (local / 'INCOMPLETE').rename(local / 'COMPLETE')
         finally:
-            if authorized:
+            if authorized and self.client is client:
                 try:
                     self.request({'command': 'download_release', 'token': token})
                 except (OSError, RuntimeError):
@@ -665,8 +676,25 @@ class Device:
 
     def disconnect(self):
         with self.lock:
+            transport = self.client.get_transport() if self.client else None
+            if self.client and (transport is None or not transport.is_active()):
+                self.drop_connection()
+                return
             self._close_session()
             if self.client:
                 self.client.close()
             self.client = self.daemon = self.remote = None
             self.info = {'connected': False}
+
+    def drop_connection(self):
+        """Discard a lost connection locally; never wait for remote cleanup."""
+        client, daemon, link = self.client, self.daemon, self.link
+        self.client = self.daemon = self.remote = self.link = None
+        self.preview_url = self.http_base = self.http_token = None
+        self.info = {'connected': False}
+        if client:
+            client.close()
+        if daemon:
+            daemon.close()
+        if link:
+            link[0].close()

@@ -1,11 +1,81 @@
 from unittest.mock import MagicMock
 from io import BytesIO
 import errno
+import socket
 import threading
 
+import paramiko
 import pytest
 
 from tide_configurator.device import Device
+
+
+@pytest.mark.parametrize('cached,hashed,port', [
+    (None, False, 22),
+    ('matching', False, 22),
+    ('matching', True, 2222),
+    ('changed', False, 22),
+])
+def test_connect_uses_user_known_hosts(tmp_path, monkeypatch, cached, hashed, port):
+    monkeypatch.setenv('HOME', str(tmp_path / 'home'))
+    known_hosts = tmp_path / 'home' / '.ssh' / 'known_hosts'
+    workspace = tmp_path / 'workspace'
+    workspace.mkdir()
+    host = 'device.example'
+    lookup = host if port == 22 else f'[{host}]:{port}'
+    key = paramiko.ECDSAKey.generate()
+    old_key = paramiko.ECDSAKey.generate()
+    # A stale private cache must not override the shared user cache.
+    (workspace / 'known_hosts').write_text(f'{lookup} {old_key.get_name()} {old_key.get_base64()}\n')
+    before = None
+    if cached:
+        known_hosts.parent.mkdir(parents=True)
+        entries = paramiko.HostKeys()
+        entries.add('other.example', old_key.get_name(), old_key)
+        entries.add(paramiko.HostKeys.hash_host(lookup) if hashed else lookup,
+                    key.get_name(), key if cached == 'matching' else old_key)
+        entries.save(str(known_hosts))
+        before = known_hosts.read_bytes()
+
+    class PasswordServer(paramiko.ServerInterface):
+        def check_auth_password(self, username, password):
+            return paramiko.AUTH_SUCCESSFUL
+
+    client_socket, server_socket = socket.socketpair()
+    server = paramiko.Transport(server_socket)
+    server.add_server_key(key)
+    server.start_server(event=threading.Event(), server=PasswordServer())
+    connect = paramiko.SSHClient.connect
+
+    def connect_over_socket(client, *args, **kwargs):
+        return connect(client, *args, sock=client_socket, **kwargs)
+
+    monkeypatch.setattr(paramiko.SSHClient, 'connect', connect_over_socket)
+    device = Device(workspace)
+    device.execute = MagicMock(side_effect=[
+        'test-kernel', 'aarch64', '/dev/root 100 10 90 10% /mnt/data',
+    ])
+    try:
+        if cached == 'changed':
+            with pytest.raises(paramiko.BadHostKeyException):
+                device.connect(host, port, 'root', 'test-password')
+            assert device.client is None
+            assert known_hosts.read_bytes() == before
+        else:
+            assert device.connect(host, port, 'root', 'test-password')['connected']
+            saved = paramiko.HostKeys(str(known_hosts))
+            assert saved.check(lookup, key)
+            if cached:
+                assert saved.check('other.example', old_key)
+            else:
+                assert known_hosts.parent.stat().st_mode & 0o777 == 0o700
+        assert old_key.get_base64() in (workspace / 'known_hosts').read_text()
+    finally:
+        if device.client:
+            device.client.close()
+        server.close()
+        client_socket.close()
+        server_socket.close()
 
 
 def test_camera_settings_use_sftp_without_device_helper(tmp_path):

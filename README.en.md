@@ -9,6 +9,7 @@ and deploy and manage SchurVINS. It currently supports SG2002 stereo TideSense d
 ## Features
 
 - Preview stereo images live, record datasets, and download recordings.
+- Keep previewing the available camera if one side stops producing frames, with the missing side marked. Recording requires both cameras.
 - Set the device's automatic exposure limit for the next preview, recording, or VIO session.
 - Display an AprilGrid calibration target in the browser and use its measured dimensions to calibrate wide-angle or fisheye cameras and the IMU.
 - Inspect calibration results, download reports and `schurvins.yaml`, or apply the configuration directly to the device.
@@ -37,6 +38,11 @@ npm --prefix frontend run build
 
 `run.sh` uses `python3` from the current `PATH`. If you want a virtual environment, create and activate
 one wherever you prefer, then install the dependencies into your chosen Python environment.
+
+SSH host keys are shared with the user running the configurator through `~/.ssh/known_hosts`.
+New host keys are saved automatically; connections are rejected if a cached key differs.
+The legacy `data/known_hosts` file is no longer read. After confirming that reflashing or replacing
+the device changed its key, run `ssh-keygen -R 192.168.123.99` to remove the old entry, then reconnect.
 
 Open <http://127.0.0.1:8765>, select the board type, and enter the device's SSH address and credentials.
 Node.js is only used to build the frontend. A frontend build is optional when using the frontend

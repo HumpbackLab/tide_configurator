@@ -2,7 +2,7 @@ import json
 import asyncio
 import threading
 import time
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 from pathlib import Path
 import sys
 
@@ -127,6 +127,131 @@ def test_stale_status_cannot_complete_or_fail_a_new_recording(tmp_path):
         assert state.active == 'a'*32
         assert state.captures[0]['status'] == 'recording'
         assert state.captures[0]['pairs'] == 5
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('camera_mask', [1, 2, 3])
+def test_preview_publishes_available_cameras_without_failing(tmp_path, camera_mask):
+    async def run():
+        state = State(tmp_path)
+        state.device.preview_url = 'http://device/stream.mjpg'
+        state.device.request = MagicMock(return_value=dict(
+            state='preview', sequence=1, width=640, height=400,
+            left_ns=1_000_000_000 if camera_mask & 1 else 0,
+            right_ns=1_002_000_000 if camera_mask & 2 else 0,
+            camera_mask=camera_mask,
+        ))
+        task = asyncio.create_task(state.poll())
+        try:
+            async def wait_for_frame():
+                while state.frame is None:
+                    await asyncio.sleep(.01)
+            await asyncio.wait_for(wait_for_frame(), 2)
+            snapshot = state.snapshot()
+            assert snapshot['frame']['camera_mask'] == camera_mask
+            assert snapshot['recorder']['state'] == 'preview'
+            assert snapshot['preview_url'] == 'http://device/stream.mjpg'
+            assert snapshot['error'] == ''
+        finally:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+    asyncio.run(run())
+
+
+def test_unplug_clears_device_preview_and_interrupts_recording(tmp_path):
+    async def run():
+        state = State(tmp_path)
+        client = state.device.client = MagicMock()
+        state.device.info = {'connected': True, 'host': 'device'}
+        state.device.remote = '/tmp/preview'
+        state.device.preview_url = state.device.http_base = 'http://device/stream.mjpg'
+        state.device.http_token = 'token'
+        state.device.cpu_counters = MagicMock(side_effect=EOFError('SSH closed'))
+        state.ros.stop = AsyncMock()
+        state.recorder = {'state': 'recording'}
+        state.frame = {'sequence': 8}
+        state.active = 'a'*32
+        state.captures.append(dict(id=state.active, status='recording', pairs=8))
+        state.poller = asyncio.create_task(asyncio.sleep(60))
+        state.cpu_poller = asyncio.create_task(state.poll_cpu())
+        await asyncio.wait_for(state.cpu_poller, 2)
+        snapshot = state.snapshot()
+        assert not snapshot['device']['connected']
+        assert state.device.client is None and state.device.remote is None
+        assert state.device.http_base is None and state.device.http_token is None
+        assert snapshot['recorder'] is None and snapshot['frame'] is None
+        assert snapshot['preview_url'] is None and snapshot['cpu_percent'] is None
+        assert snapshot['vio']['state'] == 'disconnected'
+        assert state.active is None and state.poller is None
+        assert state.captures[0]['status'] == 'interrupted'
+        assert '连接已中断' in snapshot['error']
+        assert json.loads((tmp_path / 'captures.json').read_text())[0]['status'] == 'interrupted'
+        client.exec_command.assert_not_called()
+        client.open_sftp.assert_not_called()
+        state.ros.stop.assert_awaited_once()
+    asyncio.run(run())
+
+
+def test_silent_network_loss_times_out_and_releases_ssh(tmp_path, monkeypatch):
+    monkeypatch.setattr('tide_configurator.app.CONNECTION_TIMEOUT', .05)
+    released = threading.Event()
+    async def run():
+        state = State(tmp_path)
+        client = state.device.client = MagicMock()
+        state.device.info = {'connected': True}
+        client.get_transport.return_value.close.side_effect = released.set
+        def stalled_probe():
+            assert released.wait(2)
+            raise EOFError('closed')
+        state.device.cpu_counters = stalled_probe
+        try:
+            await asyncio.wait_for(state.poll_cpu(), 1)
+            assert released.is_set()
+            assert not state.device.info['connected']
+            assert state.device.client is None
+        finally:
+            released.set()
+    asyncio.run(run())
+
+
+def test_old_connection_failure_cannot_clear_a_new_connection(tmp_path):
+    async def run():
+        state = State(tmp_path)
+        old = MagicMock()
+        new = state.device.client = MagicMock()
+        state.device.info = {'connected': True, 'host': 'new-device'}
+        await state.connection_lost(old)
+        assert state.device.client is new
+        assert state.device.info == {'connected': True, 'host': 'new-device'}
+        old.close.assert_not_called()
+    asyncio.run(run())
+
+
+def test_unplug_cancels_download_but_preserves_local_preparation(tmp_path):
+    async def run():
+        state = State(tmp_path)
+        client = state.device.client = MagicMock()
+        state.device.info = {'connected': True}
+        identifier = 'c'*32
+        state.transfers = {
+            identifier: dict(status='running', stage='download'),
+            'local': dict(status='running', stage='prepare'),
+        }
+        download = asyncio.create_task(asyncio.sleep(60), name=identifier)
+        preparation = asyncio.create_task(asyncio.sleep(60), name='prepare')
+        state.transfer_tasks.update([download, preparation])
+        try:
+            await state.connection_lost(client)
+            assert download.cancelled() and download not in state.transfer_tasks
+            assert state.transfers[identifier]['status'] == 'failed'
+            assert not preparation.done()
+            assert state.transfers['local']['status'] == 'running'
+        finally:
+            preparation.cancel()
+            await asyncio.gather(preparation, return_exceptions=True)
     asyncio.run(run())
 
 

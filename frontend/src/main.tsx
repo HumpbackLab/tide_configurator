@@ -106,7 +106,7 @@ type Snapshot = {
     output: string;
     exposure_max_us?: number;
   };
-  frame?: { width: number; height: number; sequence: number };
+  frame?: { width: number; height: number; sequence: number; camera_mask?: number };
   preview_url?: string;
   vio?: { state: string; pid?: number; path?: string; config?: string; config_sha256?: string | null; log?: string; last_error?: string };
   vio_transfer?: { status: string; stage: string; bytes: number; total: number; error?: string; backup?: string };
@@ -196,6 +196,13 @@ function StereoView({ url, frame }: { url?: string; frame?: Snapshot["frame"] })
           <p>{failed ? "预览连接中断" : "等待相机画面"}</p>
           <small>{failed ? "正在重新连接，可继续控制录制" : "连接设备并启动预览"}</small>
         </div>}
+      {url && !failed && frame && [0, 1].map((index) =>
+        !((frame.camera_mask ?? 3) & (1 << index)) &&
+        <div key={index} className={`camera-unavailable camera-unavailable-${index}`} role="status">
+          <Target size={24} strokeWidth={1} />
+          <span>{index === 0 ? "左目无图" : "右目无图"}</span>
+          <small>另一侧继续预览</small>
+        </div>)}
       <div className="camera-footer"><span>{frame ? `${frame.width} × ${frame.height} / 目 · MONO8` : "OV9281 · MONO8"}</span></div>
     </div>
   );
@@ -326,6 +333,7 @@ function App() {
     ["preparing", "recording", "finalizing"].includes(recorder.state);
   const connected = state.device.connected;
   const preview = !!recorder;
+  const partialPreview = preview && !!state.frame && (state.frame.camera_mask ?? 3) !== 3;
   const candidates = state.captures.filter((c) => c.status === "complete");
   const selected = candidates.find((c) => c.id === captureId) || candidates[0];
   const jobRunning = state.jobs.some((j) => j.status === "running");
@@ -438,7 +446,7 @@ function App() {
       </div>
       <div className="preview-status">
         <span className={`live-indicator ${preview ? "active" : ""}`} />
-        {preview ? "实时预览" : "预览未启动"}
+        {partialPreview ? "单目预览 · 双目恢复后可录制" : preview ? "实时预览" : "预览未启动"}
         <span className="preview-divider" />
         <span>原始图像方向</span>
         <span className="push-right">
@@ -840,7 +848,7 @@ function App() {
                     <button
                       className="button primary full"
                       disabled={
-                        !!busy ||
+                        !!busy || partialPreview ||
                         (tab === "calibration" && (!measured || !targetSpec)) ||
                         Object.values(state.transfers).some(
                           (t) => t.status === "running",
