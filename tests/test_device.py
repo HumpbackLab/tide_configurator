@@ -106,7 +106,7 @@ def test_camera_settings_use_sftp_without_device_helper(tmp_path):
 
     def execute(args):
         if args == [device.recorder_path, '--help']:
-            return 'TIDE_CAM_CONFIG_PATH' if updated_recorder else 'old recorder'
+            return 'TIDE_CAM_CONFIG_PATH fpn' if updated_recorder else 'old recorder'
         if args[:2] == ['mkdir', '-p']:
             return ''
         if args[:2] == ['mv', '-f']:
@@ -115,20 +115,28 @@ def test_camera_settings_use_sftp_without_device_helper(tmp_path):
         raise AssertionError(args)
 
     device.execute = execute
-    assert device.camera_settings()['source'] == 'default'
+    assert device.camera_settings() == {
+        'exposure_max_us': 500, 'fpn': True, 'source': 'default',
+        'path': device.board.camera_settings}
     with pytest.raises(RuntimeError, match='版本过旧'):
-        device.camera_settings_save(1200)
+        device.camera_settings_save(1200, True)
     updated_recorder = True
-    assert device.camera_settings_save(1200)['exposure_max_us'] == 1200
-    assert files[device.board.camera_settings] == b'exposure_max_us=1200\n'
-    files[device.board.camera_settings] = b'# edited on device\nexposure_max_us = 700\n'
+    assert device.camera_settings_save(1200, False) == {
+        'exposure_max_us': 1200, 'fpn': False, 'source': 'file',
+        'path': device.board.camera_settings}
+    assert files[device.board.camera_settings] == b'exposure_max_us=1200\nfpn=0\n'
+    files[device.board.camera_settings] = b'# edited on device\nfpn = 0\nexposure_max_us = 700\n'
     assert device.camera_settings()['exposure_max_us'] == 700
+    assert device.camera_settings()['fpn'] is False
     files[device.board.camera_settings] = b'exposure_max_us=0\n'
+    with pytest.raises(RuntimeError, match='设置文件无效'):
+        device.camera_settings()
+    files[device.board.camera_settings] = b'exposure_max_us=700\nfpn=2\n'
     with pytest.raises(RuntimeError, match='设置文件无效'):
         device.camera_settings()
     device.remote = '/tmp/active-preview'
     with pytest.raises(ValueError, match='关闭相机预览'):
-        device.camera_settings_save(1500)
+        device.camera_settings_save(1500, True)
 
 
 def test_failed_camera_start_is_cleaned_up_and_can_retry(tmp_path):

@@ -6,7 +6,7 @@ import re
 ROOT = Path(__file__).resolve().parents[2] / 'boards'
 REQUIRED = {'model', 'architecture', 'default_host', 'recorder', 'vio', 'vio_config',
             'vio_output', 'imu_name', 'data_dir'}
-OPTIONAL = {'camera_settings'}
+OPTIONAL = {'camera_settings', 'fpn_calib', 'fpn_lut_dir'}
 
 
 @dataclass(frozen=True)
@@ -22,6 +22,8 @@ class Board:
     imu_name: str
     data_dir: str
     camera_settings: str
+    fpn_calib: str
+    fpn_lut_dir: str
 
     def public(self):
         return {'id': self.id, 'model': self.model, 'default_host': self.default_host}
@@ -48,8 +50,10 @@ def load_board(board_id: str, root: Path = ROOT) -> Board:
     if missing:
         raise ValueError(f'{path} 缺少配置项：{", ".join(sorted(missing))}')
     values.setdefault('camera_settings', values['data_dir'].rstrip('/') + '/tide-configurator/camera.conf')
+    values.setdefault('fpn_calib', values['data_dir'].rstrip('/') + '/ov9281-update/fpn_calib')
+    values.setdefault('fpn_lut_dir', values['data_dir'].rstrip('/') + '/ov9281-fpn')
     for key in ('recorder', 'vio', 'vio_config', 'vio_output', 'data_dir',
-                'camera_settings'):
+                'camera_settings', 'fpn_calib', 'fpn_lut_dir'):
         value = values[key]
         remote = PurePosixPath(value)
         if not remote.is_absolute() or '..' in remote.parts or value == '/':

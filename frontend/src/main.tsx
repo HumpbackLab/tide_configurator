@@ -4,8 +4,10 @@ import {
   Activity,
   ArrowDownToLine,
   ArrowRight,
+  Camera,
   ChevronDown,
   CircleHelp,
+  CheckCircle2,
   Download,
   ExternalLink,
   FileText,
@@ -13,12 +15,14 @@ import {
   Grid2X2,
   LoaderCircle,
   Maximize2,
+  Moon,
   Play,
   Plug,
   Radio,
   RefreshCw,
   Settings2,
   Square,
+  Sun,
   Target,
   Upload,
   Waves,
@@ -69,6 +73,51 @@ type TransferProgress = {
   status: string; stage?: string; bytes: number; total: number; error?: string;
   speed_bps?: number; frames?: number; pairs?: number; cached?: boolean;
 };
+type CameraCalibrationCapture = {
+  gains: number[];
+  width: number;
+  height: number;
+  frames: number;
+  created: string;
+};
+type CameraCalibrationResult = {
+  version: number;
+  flags: number;
+  width: number;
+  height: number;
+  gains: number[];
+  created: string;
+  files: Record<string, string>;
+  cameras: {
+    camera: number;
+    buckets: {
+      gain: number;
+      black_lsb: number;
+      dark_reduction: number;
+      flat_signal_lsb: number;
+      flat_reduction: number;
+      flat_saturation: number;
+    }[];
+  }[];
+};
+type CameraCalibrationState = {
+  status: string;
+  stage: string;
+  message: string;
+  error: string;
+  mode: string;
+  progress: {
+    stage: string;
+    message: string;
+    index: number;
+    total: number;
+    gain: number;
+  };
+  dark?: CameraCalibrationCapture | null;
+  flat?: CameraCalibrationCapture | null;
+  result?: CameraCalibrationResult | null;
+  applied?: { directory: string; files: Record<string, string>; created: string } | null;
+};
 function transferLabel(t?: TransferProgress) {
   if (!t) return "取回电脑";
   const percent = t.total ? Math.min(100, Math.round(t.bytes / t.total * 100)) : 0;
@@ -112,6 +161,7 @@ type Snapshot = {
   vio_transfer?: { status: string; stage: string; bytes: number; total: number; error?: string; backup?: string };
   cpu_percent?: number | null;
   ros?: { connected: boolean; error: string };
+  camera_calibration?: CameraCalibrationState;
   error: string;
   captures: Capture[];
   jobs: Job[];
@@ -127,6 +177,18 @@ const empty: Snapshot = {
   captures: [],
   jobs: [],
   transfers: {},
+  camera_calibration: {
+    status: "idle",
+    stage: "",
+    message: "",
+    error: "",
+    mode: "",
+    progress: { stage: "", message: "", index: 0, total: 0, gain: 0 },
+    dark: null,
+    flat: null,
+    result: null,
+    applied: null,
+  },
 };
 const statusNames: Record<string, string> = {
   preparing: "准备录制",
@@ -211,9 +273,9 @@ function StereoView({ url, frame }: { url?: string; frame?: Snapshot["frame"] })
 function App() {
   const [state, setState] = useState<Snapshot>(empty);
   const [online, setOnline] = useState(false);
-  const [tab, setTab] = useState<"calibration" | "dataset" | "results" | "vio">(
-    "calibration",
-  );
+  const [tab, setTab] = useState<
+    "camera" | "calibration" | "dataset" | "results" | "vio"
+  >("calibration");
   const [connectOpen, setConnectOpen] = useState(false);
   const [boards, setBoards] = useState<Board[]>([]);
   const [board, setBoard] = useState("tidesense");
@@ -231,6 +293,14 @@ function App() {
   const [exposureSaved, setExposureSaved] = useState<number | null>(null);
   const [exposureSource, setExposureSource] = useState<"default" | "file">("default");
   const [exposureError, setExposureError] = useState("");
+  const [fpnDraft, setFpnDraft] = useState(true);
+  const [fpnSaved, setFpnSaved] = useState<boolean | null>(null);
+  const [calResolution, setCalResolution] = useState("640x400");
+  const [calGains, setCalGains] = useState("1024, 2048, 4096, 7936, 15872");
+  const [calFrames, setCalFrames] = useState(40);
+  const [calSkip, setCalSkip] = useState(8);
+  const [calDarkExposure, setCalDarkExposure] = useState("500");
+  const [calFlatExposure, setCalFlatExposure] = useState("500");
   const [seconds, setSeconds] = useState(120);
   const [output, setOutput] = useState("");
   const [noise, setNoise] = useState("");
@@ -298,6 +368,7 @@ function App() {
   useEffect(() => {
     if (!state.device.connected) {
       setExposureSaved(null);
+      setFpnSaved(null);
       setExposureError("");
       return;
     }
@@ -306,11 +377,17 @@ function App() {
       .then(async (response) => {
         const result = await response.json();
         if (!response.ok) throw new Error(result.detail || "无法读取设备相机设置");
-        return result as { exposure_max_us: number; source: "default" | "file" };
+        return result as {
+          exposure_max_us: number;
+          fpn: boolean;
+          source: "default" | "file";
+        };
       })
       .then((result) => {
         if (active) {
           setExposureSaved(result.exposure_max_us);
+          setFpnSaved(result.fpn);
+          setFpnDraft(result.fpn);
           setExposureSource(result.source);
           setExposureDraft(String(result.exposure_max_us));
           setExposureError("");
@@ -332,6 +409,43 @@ function App() {
     !!recorder &&
     ["preparing", "recording", "finalizing"].includes(recorder.state);
   const connected = state.device.connected;
+  const settingsUnchanged =
+    exposureSaved !== null &&
+    Number(exposureDraft) === exposureSaved &&
+    fpnSaved !== null &&
+    fpnDraft === fpnSaved;
+  const cameraCalibration = state.camera_calibration ?? empty.camera_calibration!;
+  const calibrationGains = calGains
+    .split(/[\s,;]+/)
+    .filter(Boolean)
+    .map(Number);
+  const calibrationGainsValid =
+    calibrationGains.length >= 2 &&
+    calibrationGains.length <= 8 &&
+    new Set(calibrationGains).size === calibrationGains.length &&
+    calibrationGains.every(
+      (gain) => Number.isInteger(gain) && gain >= 1024 && gain <= 65535,
+    );
+  const cameraCalibrationRunning = cameraCalibration.status === "running";
+  const calibrationBuckets =
+    cameraCalibration.result?.cameras.flatMap((camera) => camera.buckets) ?? [];
+  const calibrationFlatReduction = calibrationBuckets.length
+    ? calibrationBuckets.reduce((sum, bucket) => sum + bucket.flat_reduction, 0) /
+      calibrationBuckets.length
+    : 0;
+  const calibrationDarkReduction = calibrationBuckets.length
+    ? calibrationBuckets.reduce((sum, bucket) => sum + bucket.dark_reduction, 0) /
+      calibrationBuckets.length
+    : 0;
+  const calibrationStages: Record<string, string> = {
+    capture_dark: "采集暗场",
+    capture_flat: "采集平场",
+    tool_upload: "上传标定工具",
+    capture: "设备采集",
+    download: "回传数据",
+    compute: "计算 LUT",
+    complete: "完成",
+  };
   const preview = !!recorder;
   const partialPreview = preview && !!state.frame && (state.frame.camera_mask ?? 3) !== 3;
   const candidates = state.captures.filter((c) => c.status === "complete");
@@ -550,6 +664,7 @@ function App() {
       <nav className="tabs" aria-label="主要功能">
         {(
           [
+            ["camera", "相机校正", Camera],
             ["calibration", "相机标定", Target],
             ["dataset", "数据录制", FolderOpen],
             ["vio", "VIO 部署", Activity],
@@ -583,7 +698,504 @@ function App() {
           </button>
         </div>
       )}
-      {tab === "calibration" || tab === "dataset" ? (
+      {tab === "camera" ? (
+        <>
+          <div className="page-heading">
+            <div>
+              <p className="eyebrow">CAMERA FPN CALIBRATION</p>
+              <h2>配置曝光与校正双目固定竖纹。</h2>
+              <p>
+                分别采集遮光暗场和均匀光平场，在电脑上计算黑平衡、暗场列纹和平场列增益，
+                再部署为设备启动时加载的 LUT。
+              </p>
+            </div>
+            <span
+              className={`badge ${
+                cameraCalibration.error || cameraCalibration.status === "failed"
+                  ? "bad"
+                  : cameraCalibration.result
+                    ? "good"
+                    : "neutral"
+              }`}
+            >
+              {cameraCalibrationRunning ? (
+                <LoaderCircle className="spin" size={13} />
+              ) : cameraCalibration.result ? (
+                <CheckCircle2 size={13} />
+              ) : (
+                <Camera size={13} />
+              )}
+              {cameraCalibrationRunning
+                ? calibrationStages[cameraCalibration.stage] ||
+                  calibrationStages[cameraCalibration.progress.stage] ||
+                  "校正中"
+                : cameraCalibration.error || cameraCalibration.status === "failed"
+                  ? "校正失败"
+                  : cameraCalibration.result
+                    ? "LUT 已计算"
+                    : "等待采样"}
+            </span>
+          </div>
+          <div className="camera-calibration-grid">
+            <section className="panel camera-calibration-panel">
+              <div className="panel-heading">
+                <div>
+                  <p className="eyebrow">DEVICE CAMERA SETTINGS</p>
+                  <h3>设备相机设置</h3>
+                </div>
+                <button
+                  className="button light"
+                  type="button"
+                  disabled={
+                    !connected ||
+                    !!busy ||
+                    preview ||
+                    state.vio?.state !== "stopped" ||
+                    cameraCalibrationRunning ||
+                    !Number.isInteger(Number(exposureDraft)) ||
+                    Number(exposureDraft) < 1 ||
+                    Number(exposureDraft) > 50000 ||
+                    settingsUnchanged
+                  }
+                  onClick={() =>
+                    action("camera-settings", async () => {
+                      const result = await api("/camera/settings", {
+                        exposure_max_us: Number(exposureDraft),
+                        fpn: fpnDraft,
+                      });
+                      setExposureSaved(result.exposure_max_us);
+                      setFpnSaved(result.fpn);
+                      setExposureSource("file");
+                      setExposureError("");
+                    })
+                  }
+                >
+                  {busy === "camera-settings" ? (
+                    <LoaderCircle className="spin" size={15} />
+                  ) : null}
+                  保存设置
+                </button>
+              </div>
+              <div className="camera-calibration-body">
+                <label className="field">
+                  <span>
+                    自动曝光上限 <small>µs</small>
+                  </span>
+                  <input
+                    type="number"
+                    min="1"
+                    max="50000"
+                    step="1"
+                    value={exposureDraft}
+                    disabled={
+                      !connected ||
+                      !!busy ||
+                      preview ||
+                      state.vio?.state !== "stopped" ||
+                      cameraCalibrationRunning
+                    }
+                    onChange={(event) => setExposureDraft(event.target.value)}
+                  />
+                  <small>
+                    设备上的统一设置，预览、录制和 VIO 下次启动时生效。
+                  </small>
+                  {exposureError && (
+                    <small className="inline-error">{exposureError}</small>
+                  )}
+                </label>
+                <div className="field checkbox-field">
+                  <span>
+                    FPN 校正 <small>黑平衡 + 暗场列纹 + 平场增益</small>
+                  </span>
+                  <label className="checkbox-row">
+                    <input
+                      type="checkbox"
+                      checked={fpnDraft}
+                      disabled={
+                        !connected ||
+                        !!busy ||
+                        preview ||
+                        state.vio?.state !== "stopped" ||
+                        cameraCalibrationRunning
+                      }
+                      onChange={(event) => setFpnDraft(event.target.checked)}
+                    />
+                    <span>启动相机时应用 FPN LUT</span>
+                  </label>
+                  <small>
+                    需先部署 LUT，并在下次启动预览、录制或 VIO 时生效。
+                  </small>
+                </div>
+                <p className="field-hint">
+                  {exposureSaved === null
+                    ? "设备设置未读取"
+                    : `${exposureSource === "default" ? "设备默认" : "设备已保存"} ${exposureSaved} µs · FPN 校正 ${fpnSaved ? "开" : "关"}`}
+                  {recorder?.exposure_max_us
+                    ? ` · 当前采集 ${recorder.exposure_max_us} µs`
+                    : ""}
+                </p>
+              </div>
+            </section>
+
+            <section className="panel camera-calibration-panel">
+              <div className="panel-heading">
+                <div>
+                  <p className="eyebrow">CAPTURE PARAMETERS</p>
+                  <h3>采样参数</h3>
+                </div>
+                <Settings2 size={19} className="muted" />
+              </div>
+              <div className="camera-calibration-body">
+                <label className="field">
+                  <span>标定尺寸</span>
+                  <div className="select-wrap">
+                    <select
+                      value={calResolution}
+                      disabled={cameraCalibrationRunning}
+                      onChange={(event) => setCalResolution(event.target.value)}
+                    >
+                      <option value="640x400">640 × 400</option>
+                      <option value="640x480">640 × 480</option>
+                      <option value="1280x800">1280 × 800</option>
+                    </select>
+                    <ChevronDown size={15} />
+                  </div>
+                  <small>LUT 只对相同采集尺寸生效。</small>
+                </label>
+                <label className="field">
+                  <span>
+                    模拟增益 <small>Q10，逗号分隔</small>
+                  </span>
+                  <input
+                    value={calGains}
+                    disabled={cameraCalibrationRunning}
+                    onChange={(event) => setCalGains(event.target.value)}
+                    placeholder="1024, 2048, 4096, 7936, 15872"
+                  />
+                  <small className={calibrationGainsValid ? "" : "inline-error"}>
+                    需要 2..8 个不重复的 1024..65535 增益点。
+                  </small>
+                </label>
+                <div className="camera-calibration-inline">
+                  <label className="field">
+                    <span>帧数</span>
+                    <input
+                      type="number"
+                      min="4"
+                      max="200"
+                      value={calFrames}
+                      disabled={cameraCalibrationRunning}
+                      onChange={(event) => setCalFrames(Number(event.target.value))}
+                    />
+                  </label>
+                  <label className="field">
+                    <span>丢弃帧</span>
+                    <input
+                      type="number"
+                      min="0"
+                      max="100"
+                      value={calSkip}
+                      disabled={cameraCalibrationRunning}
+                      onChange={(event) => setCalSkip(Number(event.target.value))}
+                    />
+                  </label>
+                </div>
+                <div className="camera-calibration-inline">
+                  <label className="field">
+                    <span>
+                      暗场曝光 <small>µs</small>
+                    </span>
+                    <input
+                      type="number"
+                      min="1"
+                      max="50000"
+                      value={calDarkExposure}
+                      disabled={cameraCalibrationRunning}
+                      onChange={(event) => setCalDarkExposure(event.target.value)}
+                    />
+                  </label>
+                  <label className="field">
+                    <span>
+                      平场曝光 <small>µs</small>
+                    </span>
+                    <input
+                      type="number"
+                      min="1"
+                      max="50000"
+                      value={calFlatExposure}
+                      disabled={cameraCalibrationRunning}
+                      onChange={(event) => setCalFlatExposure(event.target.value)}
+                    />
+                  </label>
+                </div>
+                <p className="field-hint">
+                  已启动预览时，采集开始会自动关闭预览。暗场和平场可以使用不同曝光，
+                  但两者必须使用相同的增益集合。
+                </p>
+              </div>
+            </section>
+
+            <section className="panel camera-calibration-panel">
+              <div className="panel-heading">
+                <div>
+                  <p className="eyebrow">CAPTURE DARK / FLAT</p>
+                  <h3>采集暗场与平场</h3>
+                </div>
+                <Camera size={19} className="muted" />
+              </div>
+              <div className="camera-calibration-body">
+                <div className="calibration-capture-row">
+                  <div>
+                    <Moon size={18} />
+                    <span>
+                      <strong>暗场</strong>
+                      <small>
+                        {cameraCalibration.dark
+                          ? `${cameraCalibration.dark.gains.join(", ")} · ${cameraCalibration.dark.frames} 帧`
+                          : "盖住镜头，采集黑电平与暗场列纹"}
+                      </small>
+                    </span>
+                  </div>
+                  <button
+                    className="button secondary"
+                    disabled={
+                      !online ||
+                      !connected ||
+                      !!busy ||
+                      recordingBusy ||
+                      transferRunning ||
+                      jobRunning ||
+                      cameraCalibrationRunning ||
+                      !calibrationGainsValid
+                    }
+                    onClick={() => {
+                      const [width, height] = calResolution.split("x").map(Number);
+                      action("fpn-dark", () =>
+                        api("/camera-calibration/capture", {
+                          mode: "dark",
+                          width,
+                          height,
+                          gains: calibrationGains,
+                          frames: calFrames,
+                          skip: calSkip,
+                          exposure_us: Number(calDarkExposure),
+                        }),
+                      );
+                    }}
+                  >
+                    {busy === "fpn-dark" ? (
+                      <LoaderCircle className="spin" size={15} />
+                    ) : (
+                      <Moon size={15} />
+                    )}
+                    采集暗场
+                  </button>
+                </div>
+                <div className="calibration-capture-row">
+                  <div>
+                    <Sun size={18} />
+                    <span>
+                      <strong>平场</strong>
+                      <small>
+                        {cameraCalibration.flat
+                          ? `${cameraCalibration.flat.gains.join(", ")} · ${cameraCalibration.flat.frames} 帧`
+                          : "均匀离焦光源，避免高光过曝"}
+                      </small>
+                    </span>
+                  </div>
+                  <button
+                    className="button secondary"
+                    disabled={
+                      !online ||
+                      !connected ||
+                      !!busy ||
+                      recordingBusy ||
+                      transferRunning ||
+                      jobRunning ||
+                      cameraCalibrationRunning ||
+                      !calibrationGainsValid
+                    }
+                    onClick={() => {
+                      const [width, height] = calResolution.split("x").map(Number);
+                      action("fpn-flat", () =>
+                        api("/camera-calibration/capture", {
+                          mode: "flat",
+                          width,
+                          height,
+                          gains: calibrationGains,
+                          frames: calFrames,
+                          skip: calSkip,
+                          exposure_us: Number(calFlatExposure),
+                        }),
+                      );
+                    }}
+                  >
+                    {busy === "fpn-flat" ? (
+                      <LoaderCircle className="spin" size={15} />
+                    ) : (
+                      <Sun size={15} />
+                    )}
+                    采集平场
+                  </button>
+                </div>
+                {cameraCalibrationRunning && (
+                  <div className="calibration-progress">
+                    <div>
+                      <strong>
+                        {calibrationStages[cameraCalibration.progress.stage] ||
+                          cameraCalibration.progress.message ||
+                          "校正中"}
+                      </strong>
+                      <span>
+                        {cameraCalibration.progress.total
+                          ? `${cameraCalibration.progress.index + 1} / ${cameraCalibration.progress.total}`
+                          : ""}
+                      </span>
+                    </div>
+                    <progress
+                      max={Math.max(1, cameraCalibration.progress.total)}
+                      value={cameraCalibration.progress.index}
+                    />
+                    <small>
+                      {cameraCalibration.progress.message}
+                      {cameraCalibration.progress.gain
+                        ? ` · gain ${cameraCalibration.progress.gain}`
+                        : ""}
+                    </small>
+                  </div>
+                )}
+                {cameraCalibration.error && (
+                  <p className="inline-error">{cameraCalibration.error}</p>
+                )}
+                {!cameraCalibrationRunning && cameraCalibration.message && (
+                  <p className="field-hint success">{cameraCalibration.message}</p>
+                )}
+              </div>
+            </section>
+
+            <section className="panel camera-calibration-panel">
+              <div className="panel-heading">
+                <div>
+                  <p className="eyebrow">COMPUTE AND DEPLOY</p>
+                  <h3>计算与部署</h3>
+                </div>
+                <Activity size={19} className="muted" />
+              </div>
+              <div className="camera-calibration-body">
+                <button
+                  className="button primary full"
+                  disabled={
+                    !cameraCalibration.dark ||
+                    !cameraCalibration.flat ||
+                    !!busy ||
+                    cameraCalibrationRunning
+                  }
+                  onClick={() =>
+                    action("fpn-compute", () =>
+                      api("/camera-calibration/compute"),
+                    )
+                  }
+                >
+                  {busy === "fpn-compute" ? (
+                    <LoaderCircle className="spin" size={16} />
+                  ) : (
+                    <Activity size={16} />
+                  )}
+                  {busy === "fpn-compute" ? "计算中…" : "计算校正 LUT"}
+                </button>
+                {cameraCalibration.result ? (
+                  <>
+                    <div className="result-metrics calibration-result-metrics">
+                      <div>
+                        <span>增益点</span>
+                        <strong>{cameraCalibration.result.gains.length}</strong>
+                      </div>
+                      <div>
+                        <span>暗场列纹降低</span>
+                        <strong>
+                          {calibrationDarkReduction.toFixed(1)}
+                          <small>%</small>
+                        </strong>
+                      </div>
+                      <div>
+                        <span>平场列纹降低</span>
+                        <strong>
+                          {calibrationFlatReduction.toFixed(1)}
+                          <small>%</small>
+                        </strong>
+                      </div>
+                    </div>
+                    <div className="calibration-camera-list">
+                      {cameraCalibration.result.cameras.map((camera) => {
+                        const flat = camera.buckets.length
+                          ? camera.buckets.reduce(
+                              (sum, bucket) => sum + bucket.flat_reduction,
+                              0,
+                            ) / camera.buckets.length
+                          : 0;
+                        const dark = camera.buckets.length
+                          ? camera.buckets.reduce(
+                              (sum, bucket) => sum + bucket.dark_reduction,
+                              0,
+                            ) / camera.buckets.length
+                          : 0;
+                        return (
+                          <div key={camera.camera}>
+                            <span>
+                              CAM {camera.camera} ·{" "}
+                              {camera.camera === 0 ? "左目" : "右目"}
+                            </span>
+                            <small>
+                              暗场 {dark.toFixed(1)}% · 平场 {flat.toFixed(1)}%
+                            </small>
+                          </div>
+                        );
+                      })}
+                    </div>
+                    <button
+                      className="button secondary full"
+                      disabled={
+                        !connected ||
+                        !!busy ||
+                        cameraCalibrationRunning ||
+                        state.vio?.state !== "stopped"
+                      }
+                      onClick={() =>
+                        action("fpn-apply", () =>
+                          api("/camera-calibration/apply"),
+                        )
+                      }
+                    >
+                      {busy === "fpn-apply" ? (
+                        <LoaderCircle className="spin" size={16} />
+                      ) : (
+                        <Upload size={16} />
+                      )}
+                      {busy === "fpn-apply" ? "部署中…" : "部署 LUT 到设备"}
+                    </button>
+                    {cameraCalibration.applied && (
+                      <p className="field-hint success">
+                        LUT 已部署到 {cameraCalibration.applied.directory}。
+                        重启预览、录制或 VIO 后生效。
+                      </p>
+                    )}
+                    <p className="field-hint">
+                      LUT SHA-256：
+                      <code className="hash-value">
+                        {cameraCalibration.result.files["cam0.fpn"]}
+                      </code>
+                    </p>
+                  </>
+                ) : (
+                  <p className="field-hint">
+                    暗场和平场都采集完成后才能计算。计算在电脑上完成，不上传原始图像。
+                  </p>
+                )}
+              </div>
+            </section>
+          </div>
+        </>
+      ) : tab === "calibration" || tab === "dataset" ? (
         <>
           <div className="page-heading">
             <div>
@@ -749,30 +1361,6 @@ function App() {
                     <strong>200 Hz</strong>
                   </div>
                 </div>
-                <label className="field">
-                  <span>自动曝光上限 <small>µs</small></span>
-                  <input type="number" min="1" max="50000" step="1"
-                    value={exposureDraft}
-                    disabled={!connected || !!busy || preview || state.vio?.state !== "stopped"}
-                    onChange={(event) => setExposureDraft(event.target.value)} />
-                  <small>设备上的统一设置，预览、录制和 VIO 下次启动时生效。当前默认 500 µs。</small>
-                  {exposureError && <small className="inline-error">{exposureError}</small>}
-                  <div className="camera-setting-action">
-                    <span>{exposureSaved === null ? "设备设置未读取" :
-                      `${exposureSource === "default" ? "设备默认" : "设备已保存"} ${exposureSaved} µs`}
-                      {recorder?.exposure_max_us ? ` · 当前采集 ${recorder.exposure_max_us} µs` : ""}</span>
-                    <button className="button light" type="button"
-                      disabled={!connected || !!busy || preview || state.vio?.state !== "stopped" ||
-                        !Number.isInteger(Number(exposureDraft)) || Number(exposureDraft) < 1 ||
-                        Number(exposureDraft) > 50000 || Number(exposureDraft) === exposureSaved}
-                      onClick={() => action("camera-settings", async () => {
-                        const result = await api("/camera/settings", { exposure_max_us: Number(exposureDraft) });
-                        setExposureSaved(result.exposure_max_us);
-                        setExposureSource("file");
-                        setExposureError("");
-                      })}>保存</button>
-                  </div>
-                </label>
                 <label className="field">
                   <span>
                     录制时长 <small>秒，0 表示手动停止</small>

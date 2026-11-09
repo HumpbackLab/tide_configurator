@@ -10,7 +10,7 @@ and deploy and manage SchurVINS. It currently supports SG2002 stereo TideSense d
 
 - Preview stereo images live, record datasets, and download recordings.
 - Keep previewing the available camera if one side stops producing frames, with the missing side marked. Recording requires both cameras.
-- Set the device's automatic exposure limit for the next preview, recording, or VIO session.
+- On the camera correction page, set the automatic exposure limit and FPN switch, capture dark and flat fields, and generate or deploy black-balance, dark-column, and flat-field column-gain LUTs.
 - Display an AprilGrid calibration target in the browser and use its measured dimensions to calibrate wide-angle or fisheye cameras and the IMU.
 - Inspect calibration results, download reports and `schurvins.yaml`, or apply the configuration directly to the device.
 - Upload a SchurVINS release package, start and stop VIO, and view the SHA-256 of the current configuration.
@@ -88,9 +88,23 @@ default; set `SCHUR_ROS=0` to disable publishing.
 
 Calibration uses the `scale-misalignment` IMU model. Recordings and calibration results are saved in
 the project's `data/` directory by default.
-The automatic exposure limit is stored on the device in `/mnt/data/tide-configurator/camera.conf`,
-with content such as `exposure_max_us=1200`. Change it in the recording settings or edit the file directly;
-the setting takes effect when capture is restarted. The file path is specified by the board configuration.
+The automatic exposure limit and FPN switch are stored on the device in
+`/mnt/data/tide-configurator/camera.conf`, with content such as `exposure_max_us=1200`
+and an optional `fpn=0` or `fpn=1` (default 1, applying the black-balance, dark-column,
+and flat-field column-gain LUT in `/mnt/data/ov9281-fpn`). Change them on the camera
+correction page or edit the file directly; settings take effect when capture is restarted.
+Close preview and stop VIO before changing settings. Preview is closed automatically when
+starting a dark or flat capture. The file, calibration tool, and LUT paths are specified by
+the board configuration.
+
+FPN correction workflow:
+
+1. On the camera correction page, select the same resolution used for recording and enter 2..8 analog gain points.
+2. Cover the lens and capture a dark field, then illuminate a uniform, defocused, non-clipped target and capture a flat field. Both captures must use the same gain set.
+3. Select "Compute calibration LUT". The configurator analyzes the raw column means on the computer and writes the device-side `cam0.fpn` and `cam1.fpn`.
+4. Select "Deploy LUT to device". It takes effect the next time preview, recording, or VIO starts.
+
+The previous LUT format is no longer compatible; recapture and regenerate the LUT.
 
 ## Board configuration
 

@@ -42,6 +42,9 @@ def test_local_origin_and_screen_target(tmp_path):
         assert spec['cols'] == 6 and spec['rows'] == 4
         assert client.get('/api/target.svg').headers['content-type'].startswith('image/svg+xml')
         assert 'guidance' not in response.json()
+        assert response.json()['camera_calibration']['status'] == 'idle'
+        for path in ('capture', 'compute', 'apply'):
+            assert client.post(f'/api/camera-calibration/{path}').status_code in (400, 422)
         with client.websocket_connect('/api/events') as socket:
             assert socket.receive_json()['captures'] == []
 

@@ -9,6 +9,9 @@ def test_tidesense_programs_are_device_paths(tmp_path):
     assert [item.id for item in list_boards()] == ['tidesense']
     assert board.recorder == '/mnt/data/tidesense-dataset/bin/tidesense_record'
     assert board.vio == '/mnt/data/schurvins-gcc11-native-dds/run.sh'
+    assert board.camera_settings == '/mnt/data/tide-configurator/camera.conf'
+    assert board.fpn_calib == '/mnt/data/ov9281-update/fpn_calib'
+    assert board.fpn_lut_dir == '/mnt/data/ov9281-fpn'
     assert Device(tmp_path).recorder_path == board.recorder
 
 
@@ -30,4 +33,37 @@ imu_name=testimu
 data_dir=/mnt/data
 ''')
     with pytest.raises(ValueError, match='recorder.*绝对路径'):
+        load_board('custom', tmp_path)
+
+
+def test_optional_camera_paths_have_safe_defaults(tmp_path):
+    directory = tmp_path / 'custom'
+    directory.mkdir()
+    (directory / 'board.conf').write_text('''model=Custom
+architecture=aarch64
+default_host=192.0.2.1
+recorder=/bin/recorder
+vio=/bin/vio
+vio_config=/bin/schurvins.yaml
+vio_output=/mnt/data/vio
+imu_name=testimu
+data_dir=/mnt/data
+''')
+    board = load_board('custom', tmp_path)
+    assert board.camera_settings == '/mnt/data/tide-configurator/camera.conf'
+    assert board.fpn_calib == '/mnt/data/ov9281-update/fpn_calib'
+    assert board.fpn_lut_dir == '/mnt/data/ov9281-fpn'
+
+    (directory / 'board.conf').write_text('''model=Custom
+architecture=aarch64
+default_host=192.0.2.1
+recorder=/bin/recorder
+vio=/bin/vio
+vio_config=/bin/schurvins.yaml
+vio_output=/mnt/data/vio
+imu_name=testimu
+data_dir=/mnt/data
+fpn_lut_dir=relative/fpn
+''')
+    with pytest.raises(ValueError, match='fpn_lut_dir.*绝对路径'):
         load_board('custom', tmp_path)

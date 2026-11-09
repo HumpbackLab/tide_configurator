@@ -10,6 +10,7 @@ import re
 import shlex
 import socket
 import stat
+import struct
 import threading
 import time
 import uuid
@@ -21,6 +22,7 @@ from .boards import load_board
 from .vio import validate_package
 
 ROOT = Path(__file__).resolve().parents[2]
+CAMERA_SETTINGS_ERROR = '设备相机设置文件无效：需要 exposure_max_us=1..50000 和可选 fpn=0|1（FPN 校正）'
 
 
 class Device:
@@ -52,7 +54,7 @@ class Device:
                 except OSError as exc:
                     if exc.errno != errno.ENOENT:
                         raise
-                    return {'exposure_max_us': 500, 'source': 'default',
+                    return {'exposure_max_us': 500, 'fpn': True, 'source': 'default',
                             'path': self.board.camera_settings}
             finally:
                 sftp.close()
@@ -63,21 +65,39 @@ class Device:
                          if line.strip() and not line.lstrip().startswith('#')]
             except UnicodeDecodeError as exc:
                 raise RuntimeError('设备相机设置文件不是 ASCII 文本') from exc
-            match = re.fullmatch(r'exposure_max_us\s*=\s*([1-9][0-9]*)', lines[0]) if len(lines) == 1 else None
-            if not match or int(match[1]) > 50000:
-                raise RuntimeError('设备相机设置文件无效：需要 exposure_max_us=1..50000')
-            return {'exposure_max_us': int(match[1]), 'source': 'file',
+            values = {}
+            for line in lines:
+                key, separator, value = line.partition('=')
+                key, value = key.strip(), value.strip()
+                if not separator or key in values:
+                    raise RuntimeError(CAMERA_SETTINGS_ERROR)
+                if key == 'exposure_max_us':
+                    if not re.fullmatch(r'[1-9][0-9]*', value) or int(value) > 50000:
+                        raise RuntimeError(CAMERA_SETTINGS_ERROR)
+                    values[key] = int(value)
+                elif key == 'fpn':
+                    if value not in ('0', '1'):
+                        raise RuntimeError(CAMERA_SETTINGS_ERROR)
+                    values[key] = value == '1'
+                else:
+                    raise RuntimeError(CAMERA_SETTINGS_ERROR)
+            if 'exposure_max_us' not in values:
+                raise RuntimeError(CAMERA_SETTINGS_ERROR)
+            return {'exposure_max_us': values['exposure_max_us'],
+                    'fpn': values.get('fpn', True), 'source': 'file',
                     'path': self.board.camera_settings}
 
-    def camera_settings_save(self, exposure_max_us: int):
+    def camera_settings_save(self, exposure_max_us: int, fpn: bool):
         with self.lock:
             if type(exposure_max_us) is not int or not 1 <= exposure_max_us <= 50000:
                 raise ValueError('自动曝光上限必须在 1..50000 µs 之间')
+            if type(fpn) is not bool:
+                raise ValueError('FPN 校正选项必须是布尔值')
             if self.remote:
-                raise ValueError('请先关闭相机预览再修改曝光上限')
+                raise ValueError('请先关闭相机预览再修改相机设置')
             help_text = self.execute([self.recorder_path, '--help'])
-            if 'TIDE_CAM_CONFIG_PATH' not in help_text:
-                raise RuntimeError('设备录制器版本过旧，请先更新后再修改曝光上限')
+            if 'TIDE_CAM_CONFIG_PATH' not in help_text or 'fpn' not in help_text:
+                raise RuntimeError('设备录制器版本过旧，请先更新后再修改相机设置')
             destination = self.board.camera_settings
             parent = str(PurePosixPath(destination).parent)
             temporary = str(PurePosixPath(parent) / ('.camera.conf.' + uuid.uuid4().hex + '.tmp'))
@@ -86,7 +106,8 @@ class Device:
             try:
                 sftp.get_channel().settimeout(15)
                 with sftp.open(temporary, 'wb') as target:
-                    target.write(f'exposure_max_us={exposure_max_us}\n'.encode('ascii'))
+                    target.write((f'exposure_max_us={exposure_max_us}\n'
+                                  f'fpn={int(fpn)}\n').encode('ascii'))
                     target.flush()
                 self.execute(['mv', '-f', temporary, destination])
             except Exception:
@@ -99,16 +120,184 @@ class Device:
                 sftp.close()
             return self.camera_settings()
 
-    def execute(self, arguments):
+    def execute(self, arguments, timeout=15):
         client = self.client
         if not client:
             raise ConnectionError('设备连接已中断，请重新连接')
-        _, output, error = client.exec_command(shlex.join(arguments), timeout=15)
+        _, output, error = client.exec_command(shlex.join(arguments), timeout=timeout)
         data = output.read().decode(errors='replace')
         errors = error.read().decode(errors='replace')
         if output.channel.recv_exit_status():
             raise RuntimeError(errors.strip() or data.strip() or '设备命令失败')
         return data.strip()
+
+    def _local_fpn_calib(self):
+        override = os.environ.get('TIDE_CAM_FPN_CALIB')
+        candidates = ([Path(override).expanduser()] if override else []) + [
+            ROOT.parent / 'install/tide_cam/bin/tide_cam_fpn_calib',
+            ROOT.parent / 'tide_cam/build/tide_cam_fpn_calib',
+        ]
+        for path in candidates:
+            try:
+                if path.is_file() and not path.is_symlink():
+                    return path
+            except OSError:
+                continue
+        return None
+
+    def _remote_sha256(self, path):
+        try:
+            parts = self.execute(['sha256sum', path]).split()
+        except RuntimeError:
+            return None
+        return parts[0] if parts and re.fullmatch(r'[0-9a-f]{64}', parts[0]) else None
+
+    def _ensure_fpn_calib(self, progress):
+        remote = self.board.fpn_calib
+        local = self._local_fpn_calib()
+        remote_hash = self._remote_sha256(remote)
+        if local is None:
+            if remote_hash:
+                return remote
+            raise RuntimeError(
+                '设备缺少 FPN 标定工具，且电脑上找不到 tide_cam_fpn_calib；'
+                '请先运行 tide_cam/build.sh 或设置 TIDE_CAM_FPN_CALIB')
+        local_hash = hashlib.sha256(local.read_bytes()).hexdigest()
+        if remote_hash == local_hash:
+            return remote
+        progress('tool_upload', '上传 FPN 标定工具', 0, 0, 0)
+        parent = str(PurePosixPath(remote).parent)
+        temporary = parent + '/.fpn_calib.' + uuid.uuid4().hex + '.tmp'
+        self.execute(['mkdir', '-p', parent])
+        sftp = self.client.open_sftp()
+        sftp.get_channel().settimeout(60)
+        try:
+            try:
+                sftp.put(str(local), temporary)
+                sftp.chmod(temporary, 0o755)
+            except Exception:
+                try:
+                    sftp.remove(temporary)
+                except OSError:
+                    pass
+                raise
+        finally:
+            sftp.close()
+        self.execute(['mv', '-f', temporary, remote])
+        if self._remote_sha256(remote) != local_hash:
+            raise RuntimeError('FPN 标定工具上传后校验失败')
+        return remote
+
+    def capture_fpn(self, mode, width, height, gains, frames, skip, exposure_us,
+                    remote_root, local_root, progress):
+        if mode not in ('dark', 'flat'):
+            raise ValueError('无效的 FPN 采集模式')
+        remote_root = PurePosixPath(str(remote_root))
+        data_dir = PurePosixPath(self.board.data_dir)
+        if (not remote_root.is_absolute() or '..' in remote_root.parts or
+                data_dir not in remote_root.parents):
+            raise ValueError('FPN 临时目录不在设备数据区')
+        tool = self._ensure_fpn_calib(progress)
+        remote_stage = str(remote_root / ('run-' + uuid.uuid4().hex))
+        local_root = Path(local_root)
+        local_root.mkdir(parents=True)
+        self.execute(['mkdir', '-p', remote_stage])
+        files = ('meta.txt', 'cam0_cols.f32', 'cam0_first.pgm', 'cam0_last.pgm',
+                 'cam1_cols.f32', 'cam1_first.pgm', 'cam1_last.pgm')
+        logs = []
+        total = len(gains)
+        try:
+            for index, gain in enumerate(gains):
+                progress('capture', f'采集增益 {gain}', index, total, gain)
+                remote_out = remote_stage + f'/g{gain}'
+                self.execute(['mkdir', '-p', remote_out])
+                command = [tool, '--mode', mode, '--frames', str(frames),
+                           '--skip', str(skip), '--exposure-us', str(exposure_us),
+                           '--gain', str(gain), '--width', str(width),
+                           '--height', str(height), '--out', remote_out]
+                output = self.execute(command, timeout=180)
+                logs.append(f'$ {shlex.join(command)}\n{output}\n')
+                progress('download', f'回传增益 {gain}', index, total, gain)
+                local_out = local_root / f'g{gain}'
+                local_out.mkdir()
+                sftp = self.client.open_sftp()
+                sftp.get_channel().settimeout(60)
+                try:
+                    for name in files:
+                        remote_path = remote_out + '/' + name
+                        entry = sftp.lstat(remote_path)
+                        if not stat.S_ISREG(entry.st_mode) or not 0 < entry.st_size <= 64 * 1024 * 1024:
+                            raise RuntimeError(f'设备返回了无效的 {name}')
+                        sftp.get(remote_path, str(local_out / name))
+                finally:
+                    sftp.close()
+            (local_root / 'capture.log').write_text(''.join(logs))
+        finally:
+            if self.client:
+                try:
+                    sftp = self.client.open_sftp()
+                    try:
+                        self._remove_owned(sftp, remote_stage)
+                    finally:
+                        sftp.close()
+                except Exception:
+                    pass
+        return {'gains': list(gains), 'width': width, 'height': height,
+                'frames': frames, 'exposure_us': exposure_us}
+
+    def apply_fpn_lut(self, local_dir):
+        local_dir = Path(local_dir)
+        remote_dir = PurePosixPath(self.board.fpn_lut_dir)
+        self.execute(['mkdir', '-p', str(remote_dir)])
+        uploads = []
+        for cam in (0, 1):
+            source = local_dir / f'cam{cam}.fpn'
+            if not source.is_file() or source.is_symlink():
+                raise ValueError(f'校正结果缺少 cam{cam}.fpn')
+            data = source.read_bytes()
+            if len(data) < 24 or len(data) > 64 * 1024 * 1024:
+                raise ValueError(f'cam{cam}.fpn 文件长度无效')
+            magic, version, header, width, height, count, flags, offset, _ = \
+                struct.unpack_from('<4sHHHHHHII', data)
+            if (magic != b'TFPN' or version != 2 or header != 24 or
+                    offset != 24 or flags != 7 or not count or not width or not height or
+                    len(data) != 24 + count * (8 + 4 * width)):
+                raise ValueError(f'cam{cam}.fpn 不是新的暗场+平场格式')
+            uploads.append((source, data))
+        temporary = []
+        try:
+            sftp = self.client.open_sftp()
+            sftp.get_channel().settimeout(60)
+            try:
+                for cam, (source, _data) in enumerate(uploads):
+                    path = str(remote_dir / ('.cam%d.fpn.%s.tmp' % (cam, uuid.uuid4().hex)))
+                    sftp.put(str(source), path)
+                    sftp.chmod(path, 0o644)
+                    temporary.append(path)
+            finally:
+                sftp.close()
+            for cam, path in enumerate(temporary):
+                self.execute(['mv', '-f', path, str(remote_dir / f'cam{cam}.fpn')])
+        except Exception:
+            if self.client:
+                try:
+                    sftp = self.client.open_sftp()
+                    try:
+                        for path in temporary:
+                            try:
+                                sftp.remove(path)
+                            except OSError:
+                                pass
+                    finally:
+                        sftp.close()
+                except Exception:
+                    pass
+            raise
+        return {
+            'directory': str(remote_dir),
+            'files': {f'cam{cam}.fpn': hashlib.sha256(data).hexdigest()
+                      for cam, (_source, data) in enumerate(uploads)},
+        }
 
     def _board_script(self, name, *arguments, timeout=30):
         if not self.client:

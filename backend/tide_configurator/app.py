@@ -1,5 +1,6 @@
 """TideConfigurator: local HTTP API, shared preview and calibration jobs."""
 import asyncio
+import copy
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 import json
@@ -23,6 +24,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from tide_calibration import recording, prepared as preparation, recovery
 
 from .device import Device, ROOT
+from . import camera_calibration
 from .boards import list_boards
 from .vio import MAX_ARCHIVE_BYTES, validate_package
 from . import target
@@ -47,6 +49,17 @@ class Preview(BaseModel):
 
 class CameraSettings(BaseModel):
     exposure_max_us: int = Field(ge=1, le=50000)
+    fpn: bool = True
+
+
+class CameraCalibrationCapture(BaseModel):
+    mode: str = Field(pattern='^(dark|flat)$')
+    width: int = Field(ge=160, le=4096)
+    height: int = Field(ge=120, le=4096)
+    gains: list[int] = Field(min_length=2, max_length=8)
+    frames: int = Field(default=40, ge=4, le=200)
+    skip: int = Field(default=8, ge=0, le=100)
+    exposure_us: int = Field(default=500, ge=1, le=50000)
 
 
 class Start(BaseModel):
@@ -91,6 +104,11 @@ class State:
         self.pose_revision = 0
         self.ros = RosTelemetry(workspace, self.on_pose, self.on_tracking)
         self.jobs = Jobs(workspace)
+        self.camera_calibration_dir = workspace / 'camera-calibration'
+        self.camera_calibration_dir.mkdir(exist_ok=True)
+        self.camera_calibration_path = self.camera_calibration_dir / 'state.json'
+        self.camera_calibration = self._load_camera_calibration()
+        self.camera_task = None
         self.recorder = None
         self.frame = None
         self.poller = None
@@ -111,6 +129,163 @@ class State:
 
     def save(self):
         write_json(self.workspace / 'captures.json', self.captures)
+
+    def _load_camera_calibration(self):
+        default = dict(
+            status='idle', stage='', message='', error='', mode='',
+            progress=dict(stage='', message='', index=0, total=0, gain=0),
+            dark=None, flat=None, result=None, applied=None)
+        if self.camera_calibration_path.is_file():
+            try:
+                value = json.loads(self.camera_calibration_path.read_text())
+            except (OSError, json.JSONDecodeError):
+                value = {}
+            if isinstance(value, dict):
+                default.update(value)
+        if default['status'] == 'running':
+            default.update(status='failed', stage='', message='',
+                           error='服务已重启，请重新采集。')
+        return default
+
+    def _save_camera_calibration(self):
+        write_json(self.camera_calibration_path, self.camera_calibration)
+
+    def camera_calibration_snapshot(self):
+        return copy.deepcopy(self.camera_calibration)
+
+    def _camera_progress(self, stage, message, index, total, gain):
+        self.camera_calibration.update(
+            stage=stage, message=message,
+            progress=dict(stage=stage, message=message, index=index,
+                          total=total, gain=gain))
+
+    def _camera_task_running(self):
+        return bool(self.camera_task and not self.camera_task.done())
+
+    async def start_camera_capture(self, body):
+        async with self.operation:
+            if not self.device.info.get('connected'):
+                raise ValueError('请先连接设备')
+            if self._camera_task_running():
+                raise ValueError('已有相机校正采集正在运行')
+            if self.active or self.transfer_tasks or self.jobs.processes:
+                raise ValueError('请等待录制、数据取回或标定任务结束')
+            width, height = body.width, body.height
+            if (width, height) not in ((640, 400), (640, 480), (1280, 800)):
+                raise ValueError('相机校正只支持 640×400、640×480 或 1280×800')
+            gains = sorted(body.gains)
+            if len(set(gains)) != len(gains) or any(gain < 1024 or gain > 65535 for gain in gains):
+                raise ValueError('增益必须是 1024..65535 之间不重复的整数')
+            self.vio = await asyncio.to_thread(self.device.vio_status)
+            if self.vio['state'] != 'stopped':
+                raise ValueError('请先停止 VIO 再采集相机校正数据')
+            if self.recorder:
+                await self.stop_poller()
+                await asyncio.to_thread(self.device.close_session)
+                self.recorder = self.frame = None
+            mode = body.mode
+            temporary = self.camera_calibration_dir / (
+                f'.{mode}-{uuid.uuid4().hex}')
+            self.camera_calibration.update(
+                status='running', stage=f'capture_{mode}',
+                message='准备采集', error='', mode=mode,
+                result=None, applied=None,
+                progress=dict(stage=f'capture_{mode}', message='准备采集',
+                              index=0, total=len(gains), gain=0))
+            self._save_camera_calibration()
+            remote_root = (self.device.board.data_dir.rstrip('/') +
+                           '/tide-configurator/camera-calibration')
+            self.camera_task = asyncio.create_task(self._run_camera_capture(
+                body, gains, temporary, remote_root))
+            return self.camera_calibration_snapshot()
+
+    async def _run_camera_capture(self, body, gains, temporary, remote_root):
+        def progress(stage, message, index, total, gain):
+            self._camera_progress(stage, message, index, total, gain)
+        try:
+            await asyncio.to_thread(
+                self.device.capture_fpn, body.mode, body.width, body.height,
+                gains, body.frames, body.skip, body.exposure_us,
+                remote_root, temporary, progress)
+            summary = await asyncio.to_thread(
+                camera_calibration.validate_capture, temporary, body.mode, gains)
+            destination = self.camera_calibration_dir / body.mode
+            if destination.exists():
+                if not destination.is_dir() or destination.is_symlink():
+                    raise ValueError(f'{destination} 不是可替换的标定目录')
+                shutil.rmtree(destination)
+            temporary.replace(destination)
+            self.camera_calibration[body.mode] = summary
+            self.camera_calibration.update(
+                status='idle', stage='complete', mode='',
+                message=f'{body.mode} 采集完成：{len(gains)} 个增益',
+                error='', result=None, applied=None,
+                progress=dict(stage='complete', message='采集完成',
+                              index=len(gains), total=len(gains), gain=gains[-1]))
+        except Exception as exc:
+            if temporary.exists():
+                shutil.rmtree(temporary, ignore_errors=True)
+            self.camera_calibration.update(
+                status='failed', stage='', mode='', message='', error=str(exc))
+        finally:
+            self.camera_task = None
+            self._save_camera_calibration()
+
+    async def compute_camera_calibration(self):
+        async with self.operation:
+            if self._camera_task_running():
+                raise ValueError('请等待相机校正采集完成')
+            dark = self.camera_calibration_dir / 'dark'
+            flat = self.camera_calibration_dir / 'flat'
+            if not dark.is_dir() or not flat.is_dir():
+                raise ValueError('请先采集暗场和平场数据')
+            output = self.camera_calibration_dir / 'result'
+            self.camera_calibration.update(
+                status='running', stage='compute', message='分析暗场和平场',
+                error='', mode='', result=None, applied=None,
+                progress=dict(stage='compute', message='分析暗场和平场',
+                              index=0, total=0, gain=0))
+            self._save_camera_calibration()
+            try:
+                result = await asyncio.to_thread(
+                    camera_calibration.compute, dark, flat, output)
+            except Exception as exc:
+                self.camera_calibration.update(
+                    status='failed', stage='', message='', error=str(exc))
+                self._save_camera_calibration()
+                raise
+            self.camera_calibration.update(
+                status='idle', stage='complete', error='',
+                message=f'校正计算完成：{len(result["gains"])} 个增益',
+                result=result, applied=None,
+                progress=dict(stage='compute', message='校正计算完成',
+                              index=len(result['gains']), total=len(result['gains']),
+                              gain=result['gains'][-1]))
+            self._save_camera_calibration()
+            return result
+
+    async def apply_camera_calibration(self):
+        async with self.operation:
+            if not self.device.info.get('connected'):
+                raise ValueError('请先连接设备')
+            if self._camera_task_running():
+                raise ValueError('请等待相机校正任务结束')
+            result = self.camera_calibration.get('result')
+            output = self.camera_calibration_dir / 'result'
+            if not isinstance(result, dict) or not (output / 'cam0.fpn').is_file() or \
+                    not (output / 'cam1.fpn').is_file():
+                raise ValueError('请先计算相机校正结果')
+            self.vio = await asyncio.to_thread(self.device.vio_status)
+            if self.vio['state'] != 'stopped':
+                raise ValueError('请先停止 VIO 再部署 FPN LUT')
+            applied = await asyncio.to_thread(self.device.apply_fpn_lut, output)
+            self.camera_calibration['applied'] = dict(
+                **applied, created=datetime.now(timezone.utc).isoformat())
+            self.camera_calibration.update(
+                status='idle', stage='complete', error='',
+                message='FPN LUT 已部署，下次启动相机预览、录制或 VIO 时生效')
+            self._save_camera_calibration()
+            return self.camera_calibration['applied']
 
     def capture(self, identifier):
         for item in self.captures:
@@ -163,6 +338,7 @@ class State:
     def snapshot(self):
         return dict(device=self.device.info, recorder=self.recorder,
                     frame=self.frame, preview_url=self.device.preview_url,
+                    camera_calibration=self.camera_calibration_snapshot(),
                     vio=self.vio, vio_transfer=self.vio_transfer,
                     cpu_percent=self.cpu_percent,
                     trajectory=dict(points=self.pose_seq, session=self.pose_session,
@@ -260,6 +436,11 @@ class State:
             self.error = '设备连接已中断，请检查连接后重新连接。'
             self.capture_error = ''
             self.recorder = self.frame = self.cpu_percent = None
+            if self.camera_calibration.get('status') == 'running':
+                self.camera_calibration.update(
+                    status='failed', stage='', message='',
+                    error='设备连接已中断，请重新连接并采集。')
+                self._save_camera_calibration()
             self.vio = {'state': 'disconnected'}
             self.on_tracking(False)
             if self.active:
@@ -441,6 +622,9 @@ class State:
         self.save()
 
     async def shutdown(self):
+        if self._camera_task_running():
+            self.camera_task.cancel()
+            await asyncio.gather(self.camera_task, return_exceptions=True)
         await self.stop_cpu_poller()
         await self.ros.stop()
         if self.trajectory_file is not None:
@@ -526,6 +710,8 @@ def create_app(workspace=None):
         async with service.operation:
             if service.active or service.transfer_tasks:
                 raise ValueError('请等待录制保存和数据取回完成')
+            if service._camera_task_running():
+                raise ValueError('请等待相机校正采集完成')
             await service.stop_poller()
             await service.stop_cpu_poller()
             await service.ros.stop()
@@ -548,12 +734,28 @@ def create_app(workspace=None):
         async with service.operation:
             if not service.device.info.get('connected'):
                 raise ValueError('请先连接设备')
+            if service._camera_task_running():
+                raise ValueError('请等待相机校正采集完成')
             if service.recorder or service.active:
-                raise ValueError('请先关闭相机预览再修改曝光上限')
+                raise ValueError('请先关闭相机预览再修改相机设置')
             service.vio = await asyncio.to_thread(service.device.vio_status)
             if service.vio['state'] != 'stopped':
-                raise ValueError('请先停止 VIO 再修改曝光上限')
-            return await asyncio.to_thread(service.device.camera_settings_save, body.exposure_max_us)
+                raise ValueError('请先停止 VIO 再修改相机设置')
+            return await asyncio.to_thread(service.device.camera_settings_save,
+                                           body.exposure_max_us, body.fpn)
+
+    @app.post('/api/camera-calibration/capture')
+    async def camera_calibration_capture(body: CameraCalibrationCapture,
+                                         request: Request):
+        return await request.app.state.console.start_camera_capture(body)
+
+    @app.post('/api/camera-calibration/compute')
+    async def camera_calibration_compute(request: Request):
+        return await request.app.state.console.compute_camera_calibration()
+
+    @app.post('/api/camera-calibration/apply')
+    async def camera_calibration_apply(request: Request):
+        return await request.app.state.console.apply_camera_calibration()
 
     @app.get('/api/vio/status')
     async def vio_status(request: Request):
