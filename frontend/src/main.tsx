@@ -128,6 +128,7 @@ const empty: Snapshot = {
   jobs: [],
   transfers: {},
 };
+const VIO_IMAGE_QUALITY = 49;
 const statusNames: Record<string, string> = {
   preparing: "准备录制",
   warming: "采集启动中",
@@ -222,6 +223,7 @@ function App() {
   const [password, setPassword] = useState("");
   const [vioPackage, setVioPackage] = useState<File | null>(null);
   const [vioUploadPercent, setVioUploadPercent] = useState(0);
+  const [vioImages, setVioImages] = useState(true);
   const vioPackageInput = useRef<HTMLInputElement>(null);
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
@@ -1126,14 +1128,24 @@ function App() {
                   <div><span>运行日志</span><code>{state.vio?.log || "连接设备后显示"}</code></div>
                 </div>
                 <p className="field-hint">启动前会关闭相机预览；录制和数据取回完成后才能启动 VIO。</p>
+                <p className="field-hint">“发送双目图像”开启时，同时发布左右目 JPEG 压缩图像，质量 {VIO_IMAGE_QUALITY}（编码器将 50 保留给自定义量化表）；关闭时只发布位姿和跟踪状态。</p>
                 {state.vio?.state === "stopped" && state.vio.last_error &&
                   <p className="field-hint inline-error">上次退出：{state.vio.last_error}</p>}
               </div>
               <div className="vio-panel-footer">
+                <label className={`vio-image-toggle ${!connected || !!busy || state.vio?.state !== "stopped" ? "disabled" : ""}`}>
+                  <input type="checkbox" checked={vioImages} onChange={(event) => setVioImages(event.target.checked)}
+                    disabled={!connected || !!busy || state.vio?.state !== "stopped"} />
+                  <span className="vio-switch" aria-hidden="true" />
+                  <span className="vio-image-toggle-copy">
+                    <strong>发送双目图像</strong>
+                    <small>JPEG 质量 {VIO_IMAGE_QUALITY}</small>
+                  </span>
+                </label>
                 <button className="button primary" disabled={!connected || !!busy || recordingBusy || transferRunning || state.vio?.state !== "stopped"}
-                  onClick={() => action("vio-start", () => api("/vio/start"))}>
+                  onClick={() => action("vio-start", () => api("/vio/start", { images: vioImages, jpeg_quality: VIO_IMAGE_QUALITY }))}>
                   {busy === "vio-start" ? <LoaderCircle className="spin" size={16} /> : <Play size={16} />}
-                  启动 VIO
+                  {vioImages ? "启动 VIO 并发送图像" : "启动 VIO"}
                 </button>
                 <button className="button light" disabled={!connected || !!busy || !["running", "external"].includes(state.vio?.state || "")}
                   onClick={() => action("vio-stop", () => api("/vio/stop"))}>

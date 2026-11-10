@@ -14,6 +14,7 @@ and deploy and manage SchurVINS. It currently supports SG2002 stereo TideSense d
 - Display an AprilGrid calibration target in the browser and use its measured dimensions to calibrate wide-angle or fisheye cameras and the IMU.
 - Inspect calibration results, download reports and `schurvins.yaml`, or apply the configuration directly to the device.
 - Upload a SchurVINS release package, start and stop VIO, and view the SHA-256 of the current configuration.
+- Optionally publish stereo JPEG images while VIO runs; quality defaults to 49 and the switch is next to the start button.
 - View the live ROS 2 3D trajectory, tracking status, and device CPU usage on the VIO page.
 
 ## Requirements
@@ -77,6 +78,13 @@ the full record for the current session. The browser draws the trajectory increm
 all received points, and displays position XYZ in meters and Roll/Pitch/Yaw in degrees, converted from the
 quaternion using the ZYX Euler convention. The device's `poses.csv` retains the estimator's visual correction
 poses; the computer's JSONL file records the ROS 2 messages actually received.
+
+The "send stereo images" switch next to the VIO start button is enabled by default.
+When enabled, the configurator passes `SCHUR_JPEG_QUALITY=49` to the device and publishes
+`/tidesense/cam0/image_raw/compressed` and `/tidesense/cam1/image_raw/compressed` as JPEG
+`CompressedImage` messages. When disabled, only poses and tracking state are published.
+The default is 49 rather than 50 because the SG2002 encoder reserves 50 for a custom quantization table.
+JPEG publishing has no rate limiter or drop queue, so a slow subscriber backpressures capture and VIO.
 
 Before using live VIO trajectories, load your ROS 2 environment yourself (for example,
 `source /opt/ros/<distro>/setup.bash`) and ensure that the current Python can import `rclpy`.

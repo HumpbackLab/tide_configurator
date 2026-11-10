@@ -49,6 +49,11 @@ class CameraSettings(BaseModel):
     exposure_max_us: int = Field(ge=1, le=50000)
 
 
+class VioStart(BaseModel):
+    images: bool = False
+    jpeg_quality: int = Field(default=49, ge=1, le=99)
+
+
 class Start(BaseModel):
     kind: str = Field(pattern='^(calibration|dataset)$')
     output: str = Field(default='', max_length=4096)
@@ -566,8 +571,9 @@ def create_app(workspace=None):
         return service.vio
 
     @app.post('/api/vio/start')
-    async def vio_start(request: Request):
+    async def vio_start(request: Request, body: VioStart | None = None):
         service = request.app.state.console
+        jpeg_quality = body.jpeg_quality if body is not None and body.images else 0
         async with service.operation:
             if service.active or service.transfer_tasks:
                 raise ValueError('请先停止录制并等待数据取回完成')
@@ -581,7 +587,7 @@ def create_app(workspace=None):
                 await asyncio.to_thread(service.device.close_session)
                 service.recorder = service.frame = None
                 service.reset_trajectory()
-                service.vio = await asyncio.to_thread(service.device.vio_start)
+                service.vio = await asyncio.to_thread(service.device.vio_start, jpeg_quality)
             except Exception:
                 await service.ros.stop()
                 raise

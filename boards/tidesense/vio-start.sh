@@ -7,6 +7,7 @@ camera_settings=$4
 device_address=$5
 host_address=$6
 ROS_DOMAIN_ID=$7; export ROS_DOMAIN_ID
+jpeg_quality=${8:-0}
 PATH=/usr/sbin:/usr/bin:/sbin:/bin:$PATH; export PATH
 binary=${run%/*}/bin/schurvins_stereo
 pidfile=/run/tide-configurator-vio.pid
@@ -20,8 +21,23 @@ restore_console() {
 }
 [ -x "$run" ] || { echo "SchurVINS is not installed: $run" >&2; exit 1; }
 [ -f "$config" ] || { echo "VIO calibration is missing: $config" >&2; exit 1; }
+case "$jpeg_quality" in
+  ''|*[!0-9]*) echo 'Invalid JPEG quality' >&2; exit 1 ;;
+esac
+if [ "$jpeg_quality" -gt 99 ]; then
+  echo 'JPEG quality must be 0..99' >&2
+  exit 1
+fi
+if [ "$jpeg_quality" -eq 50 ]; then
+  echo 'JPEG quality 50 is reserved by the encoder; use 49 or 51' >&2
+  exit 1
+fi
 if [ -f "$camera_settings" ] && ! "$run" --help 2>&1 | grep -q TIDE_CAM_CONFIG_PATH; then
   echo 'SchurVINS is too old to read camera settings; deploy an updated package' >&2
+  exit 1
+fi
+if [ "$jpeg_quality" -gt 0 ] && ! "$run" --help 2>&1 | grep -q SCHUR_JPEG_QUALITY; then
+  echo 'SchurVINS is too old to publish stereo images; deploy an updated package' >&2
   exit 1
 fi
 for process in /proc/[0-9]*; do
@@ -66,6 +82,10 @@ if [ "$previous" -gt 3 ]; then
 fi
 SCHUR_ROS=1; export SCHUR_ROS
 SCHUR_PREDICTION=0; export SCHUR_PREDICTION
+unset SCHUR_JPEG_QUALITY
+if [ "$jpeg_quality" -gt 0 ]; then
+  SCHUR_JPEG_QUALITY=$jpeg_quality; export SCHUR_JPEG_QUALITY
+fi
 TIDE_CAM_CONFIG_PATH=$camera_settings; export TIDE_CAM_CONFIG_PATH
 nohup setsid "$run" --vio "$config" auto "$output/poses.csv" 0 >"$output/vio.log" 2>&1 </dev/null &
 pid=$!

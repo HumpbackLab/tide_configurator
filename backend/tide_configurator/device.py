@@ -165,8 +165,12 @@ class Device:
         return (str(ip_address(connection.getsockname()[0])),
                 str(ip_address(connection.getpeername()[0])))
 
-    def vio_start(self):
+    def vio_start(self, jpeg_quality=0):
         with self.lock:
+            if type(jpeg_quality) is not int or not 0 <= jpeg_quality <= 99:
+                raise ValueError('JPEG 质量必须在 0..99 之间')
+            if jpeg_quality == 50:
+                raise ValueError('JPEG 质量 50 是编码器保留值，请使用 49 或 51')
             if self.remote:
                 raise RuntimeError('启动 VIO 前请先关闭采集预览')
             if self.vio_status()['state'] != 'stopped':
@@ -177,7 +181,7 @@ class Device:
                 raise ValueError('ROS_DOMAIN_ID 必须在 0..232 之间')
             self._board_script('vio-start.sh', self.board.vio, self.board.vio_config,
                                self.board.vio_output, self.board.camera_settings,
-                               peer_address, local_address, domain, timeout=20)
+                               peer_address, local_address, domain, jpeg_quality, timeout=20)
             status = self.vio_status()
             if status['state'] == 'stopped':
                 raise RuntimeError('VIO 启动后立即退出；请查看设备日志')

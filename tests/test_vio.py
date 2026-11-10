@@ -97,7 +97,7 @@ def test_upload_and_vio_controls_are_separate_from_recording(tmp_path):
         assert client.post('/api/vio/deploy', content=b'bad').status_code == 400
         assert not list(state.workspace.glob('.vio-upload-*'))
         state.device.close_session = MagicMock()
-        state.device.vio_start = lambda: {'state': 'running', 'pid': 42}
+        state.device.vio_start = lambda quality=0: {'state': 'running', 'pid': 42}
         state.device.vio_stop = lambda: {'state': 'stopped'}
         state.ros.start = AsyncMock()
         state.ros.stop = AsyncMock()
@@ -121,7 +121,7 @@ def test_vio_starts_when_host_ros_is_unavailable(tmp_path):
 
         assert response.status_code == 200, response.text
         assert response.json() == {'state': 'running', 'pid': 42}
-        state.device.vio_start.assert_called_once()
+        state.device.vio_start.assert_called_once_with(0)
         snapshot = client.get('/api/state').json()
         assert snapshot['vio']['state'] == 'running'
         assert not snapshot['ros']['connected']
@@ -184,7 +184,7 @@ def test_device_cpu_counters_are_read_from_proc_stat(tmp_path):
     assert device.cpu_counters() == (100, 70)
 
 
-def test_vio_start_uses_ssh_addresses_and_host_ros_domain(tmp_path, monkeypatch):
+def test_vio_start_uses_ssh_addresses_host_ros_domain_and_jpeg_quality(tmp_path, monkeypatch):
     device = Device(tmp_path)
     device.client = MagicMock()
     connection = device.client.get_transport.return_value.sock
@@ -193,12 +193,46 @@ def test_vio_start_uses_ssh_addresses_and_host_ros_domain(tmp_path, monkeypatch)
     monkeypatch.setenv('ROS_DOMAIN_ID', '37')
     device.vio_status = MagicMock(side_effect=[{'state': 'stopped'}, {'state': 'running'}])
     device._board_script = MagicMock()
-    assert device.vio_start()['state'] == 'running'
+    assert device.vio_start(49)['state'] == 'running'
     call = device._board_script.call_args
     assert call.args[0] == 'vio-start.sh'
     assert call.args[1:] == (device.board.vio, device.board.vio_config,
                             device.board.vio_output, device.board.camera_settings,
-                            '192.168.42.99', '192.168.42.5', 37)
+                            '192.168.42.99', '192.168.42.5', 37, 49)
+    device._board_script.reset_mock()
+    device.vio_status = MagicMock(side_effect=[{'state': 'stopped'}, {'state': 'running'}])
+    assert device.vio_start()['state'] == 'running'
+    assert device._board_script.call_args.args[-1] == 0
+
+
+def test_vio_start_rejects_invalid_jpeg_quality(tmp_path):
+    device = Device(tmp_path)
+    for value in (-1, 50, 100, True, 1.5):
+        with pytest.raises(ValueError, match='JPEG'):
+            device.vio_start(value)
+
+
+def test_vio_start_api_controls_stereo_jpeg_publishing(tmp_path):
+    with TestClient(create_app(tmp_path / 'workspace')) as client:
+        state = client.app.state.console
+        state.device.info = {'connected': True, 'host': 'device'}
+        state.device.close_session = MagicMock()
+        state.device.vio_start = MagicMock(return_value={'state': 'running', 'pid': 42})
+        state.ros.start = AsyncMock()
+        state.ros.stop = AsyncMock()
+
+        assert client.post('/api/vio/start', json={'images': True}).json()['pid'] == 42
+        state.device.vio_start.assert_called_once_with(49)
+
+        state.device.vio_start.reset_mock()
+        assert client.post('/api/vio/start', json={'images': False, 'jpeg_quality': 80}).json()['pid'] == 42
+        state.device.vio_start.assert_called_once_with(0)
+
+        state.device.vio_start.reset_mock()
+        assert client.post('/api/vio/start').json()['pid'] == 42
+        state.device.vio_start.assert_called_once_with(0)
+
+        assert client.post('/api/vio/start', json={'images': True, 'jpeg_quality': 100}).status_code == 422
 
 
 def test_ros_discovery_updates_after_reconnecting_to_another_device(tmp_path, monkeypatch):
