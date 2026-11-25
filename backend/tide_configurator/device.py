@@ -569,13 +569,21 @@ class Device:
                     root_entry = sftp.lstat(root)
                     if not stat.S_ISDIR(root_entry.st_mode):
                         raise RuntimeError('设备工作目录必须为真实目录，不能是符号链接')
-                except IOError:
+                except OSError as exc:
+                    if exc.errno != errno.ENOENT:
+                        raise
                     sftp.mkdir(root)
+                try:
+                    with sftp.open(root + '/.owner') as marker:
+                        owner = marker.read()
+                except OSError as exc:
+                    if exc.errno != errno.ENOENT:
+                        raise
                     with sftp.open(root + '/.owner', 'w') as marker:
                         marker.write('TideConfigurator\n')
-                with sftp.open(root + '/.owner') as marker:
-                    if marker.read() != b'TideConfigurator\n':
-                        raise RuntimeError('设备工作目录不属于 TideConfigurator')
+                    owner = b'TideConfigurator\n'
+                if owner != b'TideConfigurator\n':
+                    raise RuntimeError('设备工作目录不属于 TideConfigurator')
                 if kind == 'calibration':
                     output = root + '/calibration'
                     try:

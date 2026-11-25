@@ -2,7 +2,9 @@ from unittest.mock import MagicMock
 from io import BytesIO
 import errno
 import socket
+import stat
 import threading
+from types import SimpleNamespace
 
 import paramiko
 import pytest
@@ -129,6 +131,51 @@ def test_camera_settings_use_sftp_without_device_helper(tmp_path):
     device.remote = '/tmp/active-preview'
     with pytest.raises(ValueError, match='关闭相机预览'):
         device.camera_settings_save(1500)
+
+
+def test_existing_workspace_gets_missing_owner_marker(tmp_path):
+    device = Device(tmp_path)
+    device.client = MagicMock()
+    device.remote = '/tmp/session'
+    device.info = {'connected': True, 'host': '192.168.123.99'}
+    files = {}
+
+    class RemoteUpload(BytesIO):
+        def __init__(self, path):
+            super().__init__()
+            self.path = path
+
+        def write(self, data):
+            return super().write(data.encode() if isinstance(data, str) else data)
+
+        def close(self):
+            if not self.closed:
+                files[self.path] = self.getvalue()
+            super().close()
+
+    def remote_open(path, mode='r'):
+        if mode in ('w', 'wb'):
+            return RemoteUpload(path)
+        if path not in files:
+            raise FileNotFoundError(errno.ENOENT, 'No such file', path)
+        return BytesIO(files[path])
+
+    sftp = device.client.open_sftp.return_value
+    sftp.open.side_effect = remote_open
+    sftp.lstat.side_effect = lambda path: (
+        SimpleNamespace(st_mode=stat.S_IFDIR | 0o700)
+        if path == '/mnt/data/tide-configurator'
+        else (_ for _ in ()).throw(FileNotFoundError(errno.ENOENT, 'No such file', path)))
+    device.request = MagicMock(side_effect=[
+        {'state': 'preview'},
+        {'state': 'recording', 'recording_id': 'a' * 32},
+    ])
+
+    output, response = device.start('dataset', '/mnt/data/capture', 0)
+
+    assert output == '/mnt/data/capture'
+    assert response['state'] == 'recording'
+    assert files['/mnt/data/tide-configurator/.owner'] == b'TideConfigurator\n'
 
 
 def test_failed_camera_start_is_cleaned_up_and_can_retry(tmp_path):
