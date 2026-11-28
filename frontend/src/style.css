@@ -1970,3 +1970,11 @@ html {
 .transfer-status progress { width: 100%; height: 5px; accent-color: var(--blue, #1765ff); }
 .transfer-status small { font-size: 11px; overflow-wrap: anywhere; }
 .capture-entry > .transfer-status { padding: 0 18px 16px 48px; }
+.startup-panel {
+  max-width: 680px;
+}
+
+.startup-fields {
+  display: grid;
+  gap: 16px;
+}

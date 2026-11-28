@@ -21,6 +21,7 @@ from .boards import load_board
 from .vio import validate_package
 
 ROOT = Path(__file__).resolve().parents[2]
+STARTUP_SCRIPT = '/etc/init.d/S99z_tidesense_startup'
 
 
 class Device:
@@ -41,6 +42,27 @@ class Device:
     @property
     def recorder_path(self):
         return self.board.recorder
+
+    def _startup(self, *arguments):
+        if self.execute(['sh', '-c', 'if [ -x "$1" ]; then echo yes; fi', 'sh', STARTUP_SCRIPT]) != 'yes':
+            raise RuntimeError('请先更新设备固件以启用开机设置')
+        return self.execute([STARTUP_SCRIPT, *arguments])
+
+    def startup_settings(self):
+        with self.lock:
+            return json.loads(self._startup('settings'))
+
+    def startup_settings_save(self, program, uvc_profile, vio_output):
+        with self.lock:
+            host, device = self.ros_addresses()
+            domain = os.environ.get('ROS_DOMAIN_ID', '0')
+            return json.loads(self._startup('configure', program, uvc_profile, vio_output,
+                                            device, host, domain))
+
+    def startup_uvc_stop(self):
+        with self.lock:
+            self._startup('stop-uvc')
+            return {'ok': True}
 
     def camera_settings(self):
         with self.lock:

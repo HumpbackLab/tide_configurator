@@ -46,6 +46,31 @@ def test_local_origin_and_screen_target(tmp_path):
             assert socket.receive_json()['captures'] == []
 
 
+def test_startup_settings_read_and_save_on_device(tmp_path, monkeypatch):
+    monkeypatch.setenv('ROS_DOMAIN_ID', '24')
+    with TestClient(create_app(tmp_path / 'workspace')) as client:
+        assert client.get('/api/startup/settings').status_code == 400
+        device = client.app.state.console.device
+        device.info = {'connected': True}
+        device.ros_addresses = lambda: ('192.168.123.23', '192.168.123.99')
+        current = dict(program='uvc', uvc_profile='400p40', vio_output='pose', uvc_state='active')
+        device._startup = MagicMock(side_effect=[
+            json.dumps(current),
+            json.dumps(dict(current, program='vio', vio_output='pose_images')),
+            '',
+        ])
+        assert client.get('/api/startup/settings').json() == current
+        bad = client.post('/api/startup/settings', json=dict(program='bad', uvc_profile='400p40', vio_output='pose'))
+        assert bad.status_code == 422
+        response = client.post('/api/startup/settings',
+                               json=dict(program='vio', uvc_profile='400p40', vio_output='pose_images'))
+        assert response.status_code == 200
+        device._startup.assert_called_with('configure', 'vio', '400p40', 'pose_images',
+                                           '192.168.123.99', '192.168.123.23', '24')
+        assert client.post('/api/startup/uvc/stop').json() == {'ok': True}
+        device._startup.assert_called_with('stop-uvc')
+
+
 def test_import_is_readonly_persists_and_rejects_incomplete(tmp_path):
     source = tmp_path / 'capture'
     capture(source)

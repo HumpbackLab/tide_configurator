@@ -121,6 +121,18 @@ type Snapshot = {
   >;
 };
 type Board = { id: string; model: string; default_host: string };
+const startupProfiles = {
+  "800p60": "1280×800 @60 fps",
+  "400p40": "640×400 @40 fps",
+  "480p180": "640×480 @180 fps",
+  "400p210": "640×400 @210 fps",
+};
+type StartupOptions = {
+  program: "uvc" | "vio" | "none";
+  uvc_profile: keyof typeof startupProfiles;
+  vio_output: "pose" | "pose_images";
+};
+type StartupStatus = StartupOptions & { uvc_state: "stopped" | "switching" | "active" };
 const empty: Snapshot = {
   device: { connected: false },
   error: "",
@@ -160,7 +172,7 @@ const date = (text: string) =>
   new Date(text).toLocaleString("zh-CN", { hour12: false });
 const size = (n = 0) =>
   n > 1e9 ? `${(n / 1e9).toFixed(1)} GB` : `${(n / 1e6).toFixed(1)} MB`;
-async function api(path: string, body?: unknown, method: "POST" | "DELETE" = "POST") {
+async function api(path: string, body?: unknown, method: "GET" | "POST" | "DELETE" = "POST") {
   const response = await fetch(`/api${path}`, {
     method,
     ...(method === "POST" ? {
@@ -209,10 +221,117 @@ function StereoView({ url, frame }: { url?: string; frame?: Snapshot["frame"] })
   );
 }
 
+function StartupPanel({ connected }: { connected: boolean }) {
+  const [saved, setSaved] = useState<StartupStatus | null>(null);
+  const [draft, setDraft] = useState<StartupOptions | null>(null);
+  const [pending, setPending] = useState(false);
+  const [message, setMessage] = useState("");
+  const [error, setError] = useState("");
+  useEffect(() => {
+    if (!connected) return;
+    let active = true;
+    async function refresh() {
+      try {
+        const data: StartupStatus = await api("/startup/settings", undefined, "GET");
+        if (!active) return;
+        setSaved(data);
+        setDraft((current) => current ?? data);
+        setError("");
+      } catch (error) {
+        if (active) setError(String(error instanceof Error ? error.message : error));
+      }
+    }
+    refresh();
+    const timer = setInterval(refresh, 3000);
+    return () => { active = false; clearInterval(timer); };
+  }, [connected]);
+
+  async function save(event: React.FormEvent) {
+    event.preventDefault();
+    if (!draft) return;
+    setPending(true);
+    setMessage("");
+    try {
+      const { program, uvc_profile, vio_output } = draft;
+      const data: StartupStatus = await api("/startup/settings", { program, uvc_profile, vio_output });
+      setSaved(data);
+      setDraft(data);
+      setMessage("已保存，下次开机生效。");
+      setError("");
+    } catch (error) {
+      setError(String(error instanceof Error ? error.message : error));
+    } finally {
+      setPending(false);
+    }
+  }
+
+  async function stopUvc() {
+    setPending(true);
+    setMessage("");
+    try {
+      await api("/startup/uvc/stop");
+      setSaved((current) => current && { ...current, uvc_state: "switching" });
+      setMessage("正在停止 UVC，USB 网络可能短暂断开。");
+      setError("");
+    } catch (error) {
+      setError(String(error instanceof Error ? error.message : error));
+    } finally {
+      setPending(false);
+    }
+  }
+
+  return (
+    <section className="panel startup-panel">
+      <div className="panel-heading"><h2>开机启动</h2></div>
+      <form onSubmit={save}>
+        <div className="vio-panel-body startup-fields">
+          {!connected && <p className="field-hint">连接设备后可以读取并修改开机设置。</p>}
+          {connected && !draft && !error && <p className="field-hint">正在读取设备设置…</p>}
+          {connected && draft && <>
+            <label className="field">
+              <span>启动程序</span>
+              <select value={draft.program} disabled={pending} onChange={(event) =>
+                setDraft({ ...draft, program: event.target.value as StartupOptions["program"] })}>
+                <option value="uvc">UVC</option>
+                <option value="vio">VIO</option>
+                <option value="none">None（不启动）</option>
+              </select>
+            </label>
+            {draft.program === "uvc" && <label className="field">
+              <span>UVC 档位（单目）</span>
+              <select value={draft.uvc_profile} disabled={pending} onChange={(event) =>
+                setDraft({ ...draft, uvc_profile: event.target.value as StartupOptions["uvc_profile"] })}>
+                {Object.entries(startupProfiles).map(([key, label]) =>
+                  <option key={key} value={key}>{label}</option>)}
+              </select>
+            </label>}
+            {draft.program === "vio" && <label className="field">
+              <span>VIO 输出</span>
+              <select value={draft.vio_output} disabled={pending} onChange={(event) =>
+                setDraft({ ...draft, vio_output: event.target.value as StartupOptions["vio_output"] })}>
+                <option value="pose">只发位姿</option>
+                <option value="pose_images">位姿 + 左右目原图（JPEG）</option>
+              </select>
+            </label>}
+          </>}
+          {error && <p className="field-hint inline-error" role="alert">{error}</p>}
+          {message && <p className="field-hint" role="status">{message}</p>}
+        </div>
+        {connected && draft && <div className="vio-panel-footer">
+          <button type="submit" className="button primary" disabled={pending}>保存开机设置</button>
+          {saved?.uvc_state === "active" && <button type="button" className="button light" disabled={pending} onClick={stopUvc}>
+            <Square size={15} />停止当前 UVC
+          </button>}
+        </div>}
+      </form>
+    </section>
+  );
+}
+
 function App() {
   const [state, setState] = useState<Snapshot>(empty);
   const [online, setOnline] = useState(false);
-  const [tab, setTab] = useState<"calibration" | "dataset" | "results" | "vio">(
+  const [tab, setTab] = useState<"calibration" | "dataset" | "results" | "vio" | "startup">(
     "calibration",
   );
   const [connectOpen, setConnectOpen] = useState(false);
@@ -555,6 +674,7 @@ function App() {
             ["calibration", "相机标定", Target],
             ["dataset", "数据录制", FolderOpen],
             ["vio", "VIO 部署", Activity],
+            ["startup", "开机设置", Settings2],
             ["results", "标定记录", FileText],
           ] as const
         ).map(([key, label, Icon]) => (
@@ -1098,6 +1218,8 @@ function App() {
             </section>
           )}
         </>
+      ) : tab === "startup" ? (
+        <StartupPanel key={connected ? state.device.host : "disconnected"} connected={connected} />
       ) : tab === "vio" ? (
         <>
           <div className="page-heading">

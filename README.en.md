@@ -69,7 +69,13 @@ When starting VIO, the configurator obtains both addresses from the current SSH 
 configures unicast DDS discovery, and forwards the host's `ROS_DOMAIN_ID` (default 0) to the device.
 No fixed IP or extra address entry is needed. The host defaults to Cyclone DDS and preserves explicit
 `RMW_IMPLEMENTATION` and `CYCLONEDDS_URI` settings. VIO continues after closing the browser;
-after a device reboot, start it again from the configurator. Boot autostart is not configured.
+after reboot, the device uses its saved startup settings.
+
+Use Startup Settings to select UVC, VIO, or None for the next boot. UVC defaults
+to 640×400 at 40 fps and offers four profiles, all with the right sensor as the
+sync master. VIO can publish poses alone or poses with both JPEG camera images.
+To free the cameras for preview, recording, or manual VIO, stop the current UVC
+session from the same page and wait for the USB network to reconnect.
 
 The configurator passes `SCHUR_PREDICTION=0` to SchurVINS so that ROS 2 publishes poses at the visual
 correction rate only (approximately 20 Hz). Every received ROS 2 pose is written with its original timestamp

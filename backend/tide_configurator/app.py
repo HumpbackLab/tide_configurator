@@ -11,6 +11,7 @@ import stat
 import tempfile
 import uuid
 import time
+from typing import Literal
 from urllib.parse import urlparse
 import yaml
 
@@ -47,6 +48,12 @@ class Preview(BaseModel):
 
 class CameraSettings(BaseModel):
     exposure_max_us: int = Field(ge=1, le=50000)
+
+
+class StartupSettings(BaseModel):
+    program: Literal['uvc', 'vio', 'none']
+    uvc_profile: Literal['800p60', '400p40', '480p180', '400p210']
+    vio_output: Literal['pose', 'pose_images']
 
 
 class VioStart(BaseModel):
@@ -240,7 +247,7 @@ class State:
                         idle = current[1] - previous[1]
                         self.cpu_percent = round(max(0, min(100, 100 * (total - idle) / total)), 1)
                     previous = current
-                except (OSError, EOFError) + paramiko_error_types():
+                except (asyncio.TimeoutError, OSError, EOFError) + paramiko_error_types():
                     await self.connection_lost(client)
                     return
                 except (RuntimeError, ValueError, IndexError):
@@ -546,6 +553,30 @@ def create_app(workspace=None):
         if not service.device.info.get('connected'):
             raise ValueError('请先连接设备')
         return await asyncio.to_thread(service.device.camera_settings)
+
+    @app.get('/api/startup/settings')
+    async def startup_settings(request: Request):
+        service = request.app.state.console
+        if not service.device.info.get('connected'):
+            raise ValueError('请先连接设备')
+        return await asyncio.to_thread(service.device.startup_settings)
+
+    @app.post('/api/startup/settings')
+    async def startup_settings_save(body: StartupSettings, request: Request):
+        service = request.app.state.console
+        async with service.operation:
+            if not service.device.info.get('connected'):
+                raise ValueError('请先连接设备')
+            return await asyncio.to_thread(service.device.startup_settings_save,
+                                           body.program, body.uvc_profile, body.vio_output)
+
+    @app.post('/api/startup/uvc/stop')
+    async def startup_uvc_stop(request: Request):
+        service = request.app.state.console
+        async with service.operation:
+            if not service.device.info.get('connected'):
+                raise ValueError('请先连接设备')
+            return await asyncio.to_thread(service.device.startup_uvc_stop)
 
     @app.post('/api/camera/settings')
     async def camera_settings_save(body: CameraSettings, request: Request):

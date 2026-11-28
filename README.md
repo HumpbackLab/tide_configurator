@@ -14,6 +14,7 @@ TideConfigurator 是运行在电脑上的 TideSense 配置工具。通过浏览�
 - 上传 SchurVINS 发布包，启动、停止 VIO，并查看当前配置的 SHA-256。
 - 启动 VIO 时可同时发布左右目 JPEG 压缩图像，默认质量 49，可在启动按钮旁关闭。
 - 在 VIO 页面查看 ROS 2 实时三维轨迹、跟踪状态和设备 CPU 占用率。
+- 在「开机设置」选择 UVC、VIO 或 None，并保存到设备。默认启动 640×400 @40 fps 的 UVC。
 
 ## 准备
 
@@ -53,7 +54,9 @@ SSH 主机密钥与运行配置器的用户共用 `~/.ssh/known_hosts`；首次�
 
 SchurVINS 默认使用原生 ROS 2 DDS，并发布 `/tidesense/pose` 和 `/tidesense/tracking`。配置器在电脑端直接订阅；设备和电脑需要处于可相互发现的同一 ROS domain。浏览器通过本地 WebSocket 接收轨迹，不直接连接 ROS 2。CPU 百分比来自设备 `/proc/stat`，每秒更新一次。
 
-通过配置器启动 VIO 时，会从当前 SSH 连接自动取得双方地址，配置 DDS 单播发现，并将电脑的 `ROS_DOMAIN_ID`（默认 0）传给设备，无需手填或固定 IP。电脑端默认使用 Cyclone DDS；显式设置的 `RMW_IMPLEMENTATION`、`CYCLONEDDS_URI` 会保留。设备关闭网页后仍继续运行 VIO，重启设备后需要重新点击启动，不配置开机自启。
+通过配置器启动 VIO 时，会从当前 SSH 连接自动取得双方地址，配置 DDS 单播发现，并将电脑的 `ROS_DOMAIN_ID`（默认 0）传给设备。电脑端默认使用 Cyclone DDS，显式设置的 `RMW_IMPLEMENTATION`、`CYCLONEDDS_URI` 会保留。关闭网页后 VIO 继续运行。
+
+「开机设置」在下次重启生效。UVC 可选四档，固件统一使用右目主同步。VIO 可只发位姿，也可同时发布双目 JPEG。若开机后需要预览、录制或手动启动 VIO，可先点击「停止当前 UVC」并等待 USB 网卡重新连接。
 
 配置器将 `SCHUR_PREDICTION=0` 传给 SchurVINS，使 ROS 2 只发布视觉校正频率的位姿（约 20 Hz）。每条收到的 ROS 2 位姿都按原时间戳写入电脑端 `data/vio-trajectories/<会话 ID>.jsonl`，不限制点数；VIO 页面可下载当前会话的完整记录。网页轨迹按块增量绘制，保留全部收到的点，并显示位置 XYZ（米）及四元数换算的 ZYX 欧拉角 Roll/Pitch/Yaw（度）。板端 `poses.csv` 仍保存估计器输出的视觉校正位姿；电脑端 JSONL 记录 ROS 2 实际收到的消息。
 
